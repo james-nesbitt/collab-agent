@@ -7,19 +7,14 @@
 # Subcommands:
 #   start                    Start the stopped instance
 #   stop                     Stop the running instance (data persists)
-#   ssh [-- EXTRA_ARGS]      Open an SSH session on the instance
-#   status                   Instance status, external IP, and container health
-#   logs [-- EXTRA_ARGS]     Tail omp-server container logs (Ctrl-C to stop)
+#   ssh [-- EXTRA_ARGS]      Open a plain SSH session on the instance
+#   connect [SESSION]        SSH in, attach to tmux session (default: "work"),
+#                            launching omp if the session is new
+#   bootstrap                Install tmux (system), mise + bun + omp (per-user).
+#                            Idempotent. Run once per OS-Login user.
+#   status                   Instance status and external IP
 #   ip                       Print the reserved static external IP
-#   build [OPTIONS]          Build the agent image on the remote instance.
-#                            Assembles build context (Dockerfile + omp-server
-#                            source) locally and pipes it to the VM as a
-#                            tarball; the entire build runs on the remote host.
-#     --tag TAG              Output image tag (default: latest)
-#     --src DIR              Path to pi-team source (default: OMP_SRC_DIR or
-#                            ~/Documents/Personal/pi-team)
-#   setup [-- EXTRA_ARGS]    Run setup-omp-server.sh on the instance via SSH
-#   destroy                  Tear down instance, static IP, and firewall rule
+#   destroy                  Tear down instance and static IP
 #   help                     Show this help
 #
 # Configuration (override via environment):
@@ -129,6 +124,68 @@ cmd_ssh() {
     exec gssh "$@"
 }
 
+cmd_connect() {
+    require_running
+    local session="${1:-work}"
+    # tmux new -A: attach if session exists, create+run command if not.
+    # bash -lc: ensures ~/.profile is sourced so omp is on PATH (in case the
+    # session is brand new and tmux execs the command via /bin/sh which would
+    # otherwise miss the user's login environment).
+    exec gcloud compute ssh "${INSTANCE_NAME}" \
+        --project="${GCP_PROJECT}" \
+        --zone="${ZONE}" \
+        $(iap_flag) \
+        --ssh-flag='-t' \
+        --command="bash -lc 'tmux new -A -s ${session} omp'"
+}
+
+
+cmd_bootstrap() {
+    require_running
+    info "Bootstrapping tmux/mise/bun/omp on instance for SSH user…"
+    # Heredoc-streamed installer that runs as whoever SSHs in (OS Login user).
+    # System tmux is sudo'd; mise/bun/omp install into the user's $HOME.
+    gssh -- 'bash -s' << 'BOOTSTRAP'
+set -e
+echo "[bootstrap] user: $(whoami)"
+
+# tmux (system)
+if ! command -v tmux >/dev/null; then
+  sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux curl unzip git
+fi
+
+# mise (user)
+if [ ! -x ~/.local/bin/mise ]; then
+  curl -fsSL https://mise.run | sh
+fi
+
+# PATH wiring — covers login (~/.profile), interactive (~/.bashrc),
+# and tmux-spawned non-login shells (PATH is inherited from the parent).
+grep -q '.bun/bin' ~/.profile 2>/dev/null || cat >> ~/.profile <<'PRF'
+
+# mise + bun PATH
+export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
+eval "$(~/.local/bin/mise activate bash --shims)" 2>/dev/null || true
+PRF
+grep -q 'mise activate' ~/.bashrc 2>/dev/null || \
+  echo 'eval "$(~/.local/bin/mise activate bash)"' >> ~/.bashrc
+
+# bun via mise
+~/.local/bin/mise use -g bun@latest >/dev/null
+
+# omp via bun
+~/.local/bin/mise exec bun -- bun install -g @oh-my-pi/pi-coding-agent
+
+echo ""
+echo "[bootstrap] versions:"
+tmux -V
+~/.local/bin/mise --version
+~/.local/bin/mise exec bun -- bun --version
+PATH="$HOME/.bun/bin:$PATH" ~/.local/bin/mise exec bun -- omp --version
+BOOTSTRAP
+    info "Bootstrap complete. Run: ./manage.sh connect"
+}
 cmd_status() {
     local status external_ip container_status
     status=$(instance_status)
@@ -141,141 +198,16 @@ cmd_status() {
 
     if [[ "${status}" == "RUNNING" ]]; then
         echo ""
-        echo "Container health (via SSH):"
-        gssh -- docker ps --filter name=omp-server \
-            --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" \
-            2>/dev/null || echo "  (SSH not yet available)"
+        echo "Connect with:"
+        echo "  ./manage.sh connect"
     fi
-}
-
-cmd_logs() {
-    require_running
-    info "Tailing omp-server logs (Ctrl-C to stop)…"
-    gssh -- docker logs omp-server -f "$@"
 }
 
 cmd_ip() {
     local ip
     ip=$(get_static_ip)
-    if [[ -z "${ip}" ]]; then
-        die "Static IP '${STATIC_IP_NAME}' not found."
-    fi
+    [[ -z "${ip}" ]] && die "Static IP '${STATIC_IP_NAME}' not found."
     echo "${ip}"
-}
-
-cmd_get_client_bundle() {
-    local user="$1"
-    [[ -n "${user}" ]] || die "Usage: ./manage.sh get-client-bundle <USER>"
-    require_running
-
-    local dest="${SCRIPT_DIR}/clients/${user}.omp-client"
-    rm -rf "${dest}"
-    mkdir -p "${SCRIPT_DIR}/clients"
-
-    info "Copying ${user}.omp-client from instance…"
-    gscp --recurse \
-        "${INSTANCE_NAME}:/tmp/omp-clients/${user}.omp-client" \
-        "${SCRIPT_DIR}/clients/"
-
-    info "Bundle saved to: ${dest}"
-}
-
-cmd_setup() {
-    require_running
-    local remote_script="/tmp/setup-omp-server.sh"
-
-    info "Copying setup-omp-server.sh to instance…"
-    gscp "${SCRIPT_DIR}/setup-omp-server.sh" "${INSTANCE_NAME}:${remote_script}"
-
-    info "Running setup on instance…"
-    gssh -- sudo bash "${remote_script}" "$@"
-}
-
-cmd_build() {
-    require_running
-    local image_tag="latest"
-    local image_repo="omp-server-agent"
-    local remote_dir="/tmp/omp-build"
-    local build_log="${remote_dir}/build.log"
-    local src_dir="${OMP_SRC_DIR:-${HOME}/Documents/Personal/pi-team}"
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --tag) shift; image_tag="$1" ;;
-            --src) shift; src_dir="$1" ;;
-        esac
-        shift
-    done
-
-    [[ -d "${src_dir}" ]] \
-        || die "omp-server source not found at ${src_dir}. Set --src DIR or OMP_SRC_DIR."
-
-    # Assemble the build context in a local temp directory:
-    #   ./Dockerfile, ./build-image.sh, ./src/ (pi-team source tree)
-    local ctx_dir
-    ctx_dir=$(mktemp -d)
-    trap "rm -rf '${ctx_dir}'" EXIT
-
-    cp "${SCRIPT_DIR}/Dockerfile" "${SCRIPT_DIR}/build-image.sh" "${ctx_dir}/"
-    mkdir -p "${ctx_dir}/src"
-    cp "${src_dir}/package.json"  "${ctx_dir}/src/"
-    cp "${src_dir}"/bun.lock*     "${ctx_dir}/src/" 2>/dev/null || true
-    cp "${src_dir}/tsconfig.json" "${ctx_dir}/src/" 2>/dev/null || true
-    cp -r "${src_dir}/packages"   "${ctx_dir}/src/"
-
-    # Stream the build context to the VM as a tarball — no registry, no SCP loop.
-    info "Streaming build context to instance…"
-    tar -czf - -C "${ctx_dir}" . \
-        | gcloud compute ssh "${INSTANCE_NAME}" \
-              --project="${GCP_PROJECT}" \
-              --zone="${ZONE}" \
-              $(iap_flag) \
-              -- "sudo mkdir -p ${remote_dir} && sudo tar -xzf - -C ${remote_dir}"
-
-    # Query the real docker GID so the image grants socket access correctly.
-    local docker_gid
-    docker_gid=$(gssh -- getent group docker 2>/dev/null | cut -d: -f3)
-    info "Docker GID on host: ${docker_gid}"
-
-    # Run the build detached so SSH disconnections don't abort it.
-    info "Starting build on instance (first build ~15 min)…"
-    gssh -- "sudo bash -c 'nohup bash ${remote_dir}/build-image.sh \
-                --output-repo ${image_repo} \
-                --tag ${image_tag} \
-                --build-arg DOCKER_GID=${docker_gid} \
-                > ${build_log} 2>&1 & echo \$! > ${remote_dir}/build.pid
-              echo Build PID: \$(cat ${remote_dir}/build.pid)'"
-
-    # Tail the log; reconnect if SSH drops.
-    info "Streaming build log (reconnects if SSH drops)…"
-    local pid
-    while true; do
-        pid=$(gssh -- "sudo cat ${remote_dir}/build.pid 2>/dev/null" 2>/dev/null || true)
-        [[ -z "${pid}" ]] && { info "Build PID not found — may have already finished."; break; }
-        gssh -- "sudo tail -n +1 -f ${build_log} &
-                 TAIL=\$!
-                 while sudo kill -0 \$(sudo cat ${remote_dir}/build.pid 2>/dev/null) 2>/dev/null; do sleep 3; done
-                 sleep 1; kill \$TAIL 2>/dev/null; wait \$TAIL 2>/dev/null" && break || true
-        info "SSH dropped — reconnecting…"
-        sleep 5
-    done
-
-    # Check exit status.
-    local exit_code
-    exit_code=$(gssh -- "sudo cat ${remote_dir}/build.pid 2>/dev/null | xargs -r sudo wait 2>/dev/null; echo \$?" 2>/dev/null || echo "unknown")
-    if [[ "${exit_code}" != "0" && "${exit_code}" != "unknown" ]]; then
-        gssh -- "sudo tail -30 ${build_log}" 2>/dev/null || true
-        die "Build failed (exit ${exit_code}). See log above."
-    fi
-
-    # Update .env so the next compose up uses the freshly built image.
-    info "Updating /opt/omp-server/.env…"
-    gssh -- "sudo sed -i 's|^IMAGE_REPO=.*|IMAGE_REPO=${image_repo}|' /opt/omp-server/.env \
-             && sudo sed -i 's|^IMAGE_TAG=.*|IMAGE_TAG=${image_tag}|' /opt/omp-server/.env"
-
-    echo ""
-    echo "  Image built : ${image_repo}:${image_tag}"
-    echo "  Apply with  : GCP_PROJECT=${GCP_PROJECT} ./manage.sh setup -- --image ${image_repo}:${image_tag} --user <USER>"
 }
 
 cmd_destroy() {
@@ -335,17 +267,15 @@ SUBCOMMAND="${1:-help}"
 shift 2>/dev/null || true
 
 case "${SUBCOMMAND}" in
-    start)               cmd_start "$@" ;;
-    stop)                cmd_stop "$@" ;;
-    ssh)                 cmd_ssh "$@" ;;
-    status)              cmd_status "$@" ;;
-    logs)                cmd_logs "$@" ;;
-    ip)                  cmd_ip "$@" ;;
-    get-client-bundle)   cmd_get_client_bundle "$@" ;;
-    build)               cmd_build "$@" ;;
-    setup)               cmd_setup "$@" ;;
-    destroy)             cmd_destroy "$@" ;;
-    help|--help|-h)      cmd_help ;;
+    start)          cmd_start "$@" ;;
+    stop)           cmd_stop "$@" ;;
+    ssh)            cmd_ssh "$@" ;;
+    connect)        cmd_connect "$@" ;;
+    bootstrap)      cmd_bootstrap "$@" ;;
+    status)         cmd_status "$@" ;;
+    ip)             cmd_ip "$@" ;;
+    destroy)        cmd_destroy "$@" ;;
+    help|--help|-h) cmd_help ;;
     *)
         echo "Unknown subcommand: ${SUBCOMMAND}" >&2
         echo "Run './manage.sh help' for usage." >&2
