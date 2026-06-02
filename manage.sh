@@ -12,11 +12,12 @@
 #   logs [-- EXTRA_ARGS]     Tail omp-server container logs (Ctrl-C to stop)
 #   ip                       Print the reserved static external IP
 #   build [OPTIONS]          Build the agent image on the remote instance.
-#                            Transfers the local omp-server image to the VM
-#                            via docker save|load (no registry needed), then
-#                            runs docker buildx build on the VM.
-#     --omp-image REPO:TAG   Local omp-server image to transfer (required)
+#                            Assembles build context (Dockerfile + omp-server
+#                            source) locally and pipes it to the VM as a
+#                            tarball; the entire build runs on the remote host.
 #     --tag TAG              Output image tag (default: latest)
+#     --src DIR              Path to pi-team source (default: OMP_SRC_DIR or
+#                            ~/Documents/Personal/pi-team)
 #   setup [-- EXTRA_ARGS]    Run setup-omp-server.sh on the instance via SSH
 #   destroy                  Tear down instance, static IP, and firewall rule
 #   help                     Show this help
@@ -195,55 +196,56 @@ cmd_build() {
     local image_repo="omp-server-agent"
     local remote_dir="/tmp/omp-build"
     local build_log="${remote_dir}/build.log"
-    local omp_image=""
+    local src_dir="${OMP_SRC_DIR:-${HOME}/Documents/Personal/pi-team}"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --tag)        shift; image_tag="$1" ;;
-            --omp-image)  shift; omp_image="$1" ;;
+            --tag) shift; image_tag="$1" ;;
+            --src) shift; src_dir="$1" ;;
         esac
         shift
     done
 
-    [[ -n "${omp_image}" ]] || die "Specify the local omp-server image with --omp-image REPO:TAG"
+    [[ -d "${src_dir}" ]] \
+        || die "omp-server source not found at ${src_dir}. Set --src DIR or OMP_SRC_DIR."
 
-    # Parse repo and tag from the omp_image argument.
-    local omp_repo="${omp_image%%:*}"
-    local omp_tag="${omp_image##*:}"
-    [[ "${omp_repo}" == "${omp_tag}" ]] && omp_tag="latest"   # no colon given
+    # Assemble the build context in a local temp directory:
+    #   ./Dockerfile, ./build-image.sh, ./src/ (pi-team source tree)
+    local ctx_dir
+    ctx_dir=$(mktemp -d)
+    trap "rm -rf '${ctx_dir}'" EXIT
 
-    # Transfer the local omp-server image to the VM via docker save|load.
-    # This avoids needing registry credentials on the remote host.
-    info "Transferring ${omp_image} to instance (this may take a minute)…"
-    docker save "${omp_image}" \
+    cp "${SCRIPT_DIR}/Dockerfile" "${SCRIPT_DIR}/build-image.sh" "${ctx_dir}/"
+    mkdir -p "${ctx_dir}/src"
+    cp "${src_dir}/package.json"  "${ctx_dir}/src/"
+    cp "${src_dir}"/bun.lock*     "${ctx_dir}/src/" 2>/dev/null || true
+    cp "${src_dir}/tsconfig.json" "${ctx_dir}/src/" 2>/dev/null || true
+    cp -r "${src_dir}/packages"   "${ctx_dir}/src/"
+
+    # Stream the build context to the VM as a tarball — no registry, no SCP loop.
+    info "Streaming build context to instance…"
+    tar -czf - -C "${ctx_dir}" . \
         | gcloud compute ssh "${INSTANCE_NAME}" \
               --project="${GCP_PROJECT}" \
               --zone="${ZONE}" \
               $(iap_flag) \
-              -- sudo docker load
-
-    info "Copying build context to instance…"
-    gssh -- mkdir -p "${remote_dir}"
-    gscp "${SCRIPT_DIR}/Dockerfile" "${SCRIPT_DIR}/build-image.sh" \
-        "${INSTANCE_NAME}:${remote_dir}/"
+              -- "sudo mkdir -p ${remote_dir} && sudo tar -xzf - -C ${remote_dir}"
 
     # Query the real docker GID so the image grants socket access correctly.
     local docker_gid
     docker_gid=$(gssh -- getent group docker 2>/dev/null | cut -d: -f3)
     info "Docker GID on host: ${docker_gid}"
 
-    # Run the build detached on the VM so SSH disconnections don't abort it.
+    # Run the build detached so SSH disconnections don't abort it.
     info "Starting build on instance (first build ~15 min)…"
     gssh -- "sudo nohup bash ${remote_dir}/build-image.sh \
                 --output-repo ${image_repo} \
                 --tag ${image_tag} \
-                --build-arg OMP_BASE_REPO=${omp_repo} \
-                --build-arg OMP_BASE_TAG=${omp_tag} \
                 --build-arg DOCKER_GID=${docker_gid} \
                 > ${build_log} 2>&1 & echo \$! > ${remote_dir}/build.pid
               echo 'Build PID:' \$(cat ${remote_dir}/build.pid)"
 
-    # Tail the log; loop until the build process exits.
+    # Tail the log; reconnect if SSH drops.
     info "Streaming build log (reconnects if SSH drops)…"
     local pid
     while true; do
@@ -257,7 +259,7 @@ cmd_build() {
         sleep 5
     done
 
-    # Check exit status of the build.
+    # Check exit status.
     local exit_code
     exit_code=$(gssh -- "wait ${pid} 2>/dev/null; echo \$?" 2>/dev/null || echo "unknown")
     if [[ "${exit_code}" != "0" && "${exit_code}" != "unknown" ]]; then

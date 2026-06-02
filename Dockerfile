@@ -1,40 +1,59 @@
 # syntax=docker/dockerfile:1
 # Dockerfile — omp-server-agent
 #
-# Multi-stage build:
-#   Stage 1 (omp-app)       — extracts the compiled omp-server application
-#                             from the upstream image; no code built here
-#   Stage 2 (tool-installer)— downloads all CLI tool binaries on ubuntu:24.04
-#                             which has reliable curl/unzip availability
-#   Stage 3 (final)         — Fedora base; dnf for system packages and repos,
-#                             tooling copied from stage 2, app from stage 1
+# Multi-stage build, entirely self-contained on the build host:
 #
-# The upstream omp-server image is transferred to the build host by
-# manage.sh before the build runs (docker save | docker load over SSH),
-# so no registry credentials are needed on the remote machine.
+#   Stage 1 (omp-builder)    — builds the omp-server from source using
+#                              oven/bun:1; no pre-built image required
+#   Stage 2 (tool-installer) — downloads all CLI tool binaries on
+#                              ubuntu:24.04 (reliable curl/unzip/python3)
+#   Stage 3 (final)          — fedora:latest base; dnf for system packages,
+#                              app copied from stage 1, tools from stage 2
 #
-# Build (via manage.sh — this is the normal path):
+# Build context layout (assembled by manage.sh build):
+#   ./Dockerfile
+#   ./build-image.sh
+#   ./src/                   ← pi-team source tree
+#       package.json
+#       bun.lock
+#       tsconfig.json
+#       packages/
+#           server/
+#           shared/
+#           client/
+#
+# Usage (via manage.sh — normal path):
 #   GCP_PROJECT=my-project ./manage.sh build
 #
-# Direct build (overriding base):
-#   docker buildx build \
-#     --build-arg OMP_BASE_REPO=my-repo/omp-server \
-#     --build-arg OMP_BASE_TAG=latest \
-#     -t omp-server-agent:latest --load .
-
-ARG OMP_BASE_REPO=omp-server
-ARG OMP_BASE_TAG=local
+# Direct build:
+#   docker buildx build -t omp-server-agent:latest --load .
 
 # =============================================================================
-# Stage 1 — omp-app
-# Extract the compiled server application from the upstream image.
-# Nothing is built here; this stage exists solely as a copy source.
+# Stage 1 — omp-builder
+# Compile the omp-server application from source.
+# Mirrors the build stage in the upstream pi-team Dockerfile.
 # =============================================================================
-FROM ${OMP_BASE_REPO}:${OMP_BASE_TAG} AS omp-app
+FROM oven/bun:1 AS omp-builder
+
+WORKDIR /build
+
+# Install dependencies first for layer-cache efficiency
+COPY src/package.json src/bun.lock* ./
+COPY src/packages/shared/package.json  packages/shared/
+COPY src/packages/server/package.json  packages/server/
+COPY src/packages/client/package.json  packages/client/
+RUN bun install --frozen-lockfile
+
+# Build server
+COPY src/tsconfig.json .
+COPY src/packages/ packages/
+RUN bun build packages/server/src/main.ts \
+      --outdir packages/server/dist \
+      --target bun
 
 # =============================================================================
 # Stage 2 — tool-installer
-# Download all CLI tools on Ubuntu 24.04 (reliable curl/unzip/python3).
+# Download all CLI tools on Ubuntu 24.04.
 # Binaries land in /tools; SDK dirs in /opt.
 # =============================================================================
 FROM ubuntu:24.04 AS tool-installer
@@ -92,7 +111,7 @@ RUN set -eux \
     && rm /tmp/docker.tgz \
     && /tools/docker --version
 
-# --- uv (statically linked musl binary) ---
+# --- uv (statically linked) ---
 RUN set -eux \
     && case "${TARGETARCH}" in \
          amd64) uarch="x86_64-unknown-linux-musl" ;; \
@@ -163,8 +182,6 @@ RUN set -eux \
 
 # =============================================================================
 # Stage 3 — final (Fedora)
-# dnf provides git, podman-remote, and a consistent RPM ecosystem.
-# Tools are copied from the installer stage; the omp-server app from stage 1.
 # =============================================================================
 FROM fedora:latest
 
@@ -173,10 +190,7 @@ ARG AGENT_UID=1000
 ARG AGENT_GID=1000
 ARG DOCKER_GID=988
 
-# System packages via dnf:
-#   git          — source control for agent tasks
-#   podman-remote— Podman CLI client; talks to host daemon via CONTAINER_HOST
-#   shadow-utils — useradd/groupadd
+# System packages via dnf
 RUN dnf install -y \
         git \
         podman-remote \
@@ -184,38 +198,46 @@ RUN dnf install -y \
         ca-certificates \
     && dnf clean all
 
-# --- Static / self-contained binaries from installer ---
+# --- omp-server application ---
+WORKDIR /app
+COPY --from=omp-builder /build/packages/server/dist/   ./dist/
+COPY --from=omp-builder /build/node_modules/           ./node_modules/
+COPY --from=omp-builder /build/packages/shared/        ./packages/shared/
+COPY --from=omp-builder /build/package.json            ./
+
+# bun runtime — copied directly from the builder image
+COPY --from=omp-builder /usr/local/bin/bun /usr/local/bin/bun
+
+# --- CLI tools from installer ---
 COPY --from=tool-installer /tools/terraform   /usr/local/bin/terraform
 COPY --from=tool-installer /tools/packer      /usr/local/bin/packer
 COPY --from=tool-installer /tools/docker      /usr/local/bin/docker
 COPY --from=tool-installer /tools/uv          /usr/local/bin/uv
 COPY --from=tool-installer /tools/uvx         /usr/local/bin/uvx
 COPY --from=tool-installer /tools/aws         /usr/local/bin/aws
-
-# --- SDK / runtime directories from installer ---
 COPY --from=tool-installer /opt/aws-cli          /opt/aws-cli
 COPY --from=tool-installer /opt/google-cloud-sdk /opt/google-cloud-sdk
 COPY --from=tool-installer /opt/azure-cli        /opt/azure-cli
 COPY --from=tool-installer /opt/nodejs           /opt/nodejs
 
-# --- omp-server application from upstream image ---
-COPY --from=omp-app /app /app
-
 ENV PATH="/opt/google-cloud-sdk/bin:/opt/nodejs/bin:/opt/azure-cli/bin:${PATH}"
+ENV OMP_SERVER_DATA_DIR=/data
+ENV PI_CODING_AGENT_DIR=/data/agent
 
 RUN ln -s /opt/azure-cli/bin/az /usr/local/bin/az \
     && ln -s /usr/bin/podman-remote /usr/local/bin/podman
 
-# Create agent user, docker group, fix ownership
+# Agent user, docker group, ownership
 RUN groupadd -g "${AGENT_GID}" "${AGENT_USER}" 2>/dev/null || true \
     && useradd -m -u "${AGENT_UID}" -g "${AGENT_GID}" -s /bin/bash "${AGENT_USER}" \
     && groupadd -g "${DOCKER_GID}" docker 2>/dev/null || true \
     && usermod -aG docker "${AGENT_USER}" \
-    && chown -R "${AGENT_UID}:${AGENT_GID}" /app \
-    && mkdir -p /data && chown "${AGENT_UID}:${AGENT_GID}" /data
+    && mkdir -p /data /app/.clients \
+    && chown -R "${AGENT_UID}:${AGENT_GID}" /app /data
 
 # Smoke-test all tools before dropping privileges
-RUN terraform version \
+RUN bun --version \
+    && terraform version \
     && packer version \
     && docker --version \
     && uv --version \
@@ -227,4 +249,8 @@ RUN terraform version \
     && node --version \
     && npm --version
 
+EXPOSE 7077
+
 USER ${AGENT_USER}
+ENTRYPOINT ["bun", "run", "dist/main.js"]
+CMD ["start"]
