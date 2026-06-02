@@ -13,8 +13,8 @@
 #   ip                       Print the reserved static external IP
 #   get-client-bundle USER   SCP client bundle to ./clients/<USER>.omp-client/
 #   build [TAG]              Build the agent image on the instance (default tag: latest)
-#                            Options: --registry-user USER --registry-password PASS
-#                            for private base image registries
+#                            Copies Dockerfile + build-image.sh, runs build remotely,
+#                            updates /opt/omp-server/.env. No registry required.
 #   setup [-- EXTRA_ARGS]    Run setup-omp-server.sh on the instance via SSH
 #   destroy                  Tear down instance, static IP, and firewall rule
 #   help                     Show this help
@@ -189,35 +189,15 @@ cmd_setup() {
 
 cmd_build() {
     require_running
-    local image_tag="latest"
+    local image_tag="${1:-latest}"
     local image_repo="omp-server-agent"
     local remote_dir="/tmp/omp-build"
     local build_log="${remote_dir}/build.log"
-    local registry_user=""
-    local registry_password=""
-    local registry_host=""
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --tag)               shift; image_tag="$1" ;;
-            --registry-user)     shift; registry_user="$1" ;;
-            --registry-password) shift; registry_password="$1" ;;
-            --registry-host)     shift; registry_host="$1" ;;
-        esac
-        shift
-    done
 
     info "Copying build context to instance…"
     gssh -- mkdir -p "${remote_dir}"
     gscp "${SCRIPT_DIR}/Dockerfile" "${SCRIPT_DIR}/build-image.sh" \
         "${INSTANCE_NAME}:${remote_dir}/"
-
-    # Log in to the base image registry if credentials supplied.
-    if [[ -n "${registry_user}" && -n "${registry_password}" ]]; then
-        local host="${registry_host:-registry.ci.mirantis.com}"
-        info "Logging into ${host} on instance…"
-        gssh -- "echo '${registry_password}' | sudo docker login '${host}' -u '${registry_user}' --password-stdin"
-    fi
 
     # Query the real docker GID so the image grants socket access correctly.
     local docker_gid
