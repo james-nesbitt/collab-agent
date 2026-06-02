@@ -206,7 +206,7 @@ cmd_build() {
 
     # Run the build detached on the VM so SSH disconnections don't abort it.
     info "Starting build on instance (first build ~15 min)…"
-    gssh -- "nohup bash ${remote_dir}/build-image.sh \
+    gssh -- "sudo nohup bash ${remote_dir}/build-image.sh \
                 --output-repo ${image_repo} \
                 --tag ${image_tag} \
                 --build-arg DOCKER_GID=${docker_gid} \
