@@ -12,6 +12,9 @@
 #   logs [-- EXTRA_ARGS]     Tail omp-server container logs (Ctrl-C to stop)
 #   ip                       Print the reserved static external IP
 #   get-client-bundle USER   SCP client bundle to ./clients/<USER>.omp-client/
+#   build [TAG]              Build the agent image on the instance (default tag: latest)
+#                            Copies Dockerfile + build-image.sh, runs build remotely,
+#                            updates /opt/omp-server/.env. No registry required.
 #   setup [-- EXTRA_ARGS]    Run setup-omp-server.sh on the instance via SSH
 #   destroy                  Tear down instance, static IP, and firewall rule
 #   help                     Show this help
@@ -187,6 +190,46 @@ cmd_setup() {
         -- sudo bash "${remote_script}" "$@"
 }
 
+cmd_build() {
+    require_running
+    local image_tag="${1:-latest}"
+    local image_repo="omp-server-agent"
+    local remote_dir="/tmp/omp-build"
+
+    info "Copying build context to instance…"
+    gcloud compute ssh "${INSTANCE_NAME}" \
+        --project="${GCP_PROJECT}" \
+        --zone="${ZONE}" \
+        -- mkdir -p "${remote_dir}"
+
+    gcloud compute scp \
+        --project="${GCP_PROJECT}" \
+        --zone="${ZONE}" \
+        "${SCRIPT_DIR}/Dockerfile" \
+        "${SCRIPT_DIR}/build-image.sh" \
+        "${INSTANCE_NAME}:${remote_dir}/"
+
+    info "Building ${image_repo}:${image_tag} on instance (first build ~10-15 min)…"
+    gcloud compute ssh "${INSTANCE_NAME}" \
+        --project="${GCP_PROJECT}" \
+        --zone="${ZONE}" \
+        -- bash "${remote_dir}/build-image.sh" \
+             --output-repo "${image_repo}" \
+             --tag "${image_tag}"
+
+    # Update .env so the next `docker compose up` uses the freshly built image.
+    info "Updating /opt/omp-server/.env…"
+    gcloud compute ssh "${INSTANCE_NAME}" \
+        --project="${GCP_PROJECT}" \
+        --zone="${ZONE}" \
+        -- "sudo sed -i 's|^IMAGE_REPO=.*|IMAGE_REPO=${image_repo}|' /opt/omp-server/.env \
+            && sudo sed -i 's|^IMAGE_TAG=.*|IMAGE_TAG=${image_tag}|' /opt/omp-server/.env"
+
+    echo ""
+    echo "  Image built: ${image_repo}:${image_tag}"
+    echo "  To apply:    ./manage.sh ssh -- sudo docker compose -f /opt/omp-server/docker-compose.yml up -d"
+}
+
 cmd_destroy() {
     echo ""
     echo "WARNING: This will permanently delete:"
@@ -251,6 +294,7 @@ case "${SUBCOMMAND}" in
     logs)                cmd_logs "$@" ;;
     ip)                  cmd_ip "$@" ;;
     get-client-bundle)   cmd_get_client_bundle "$@" ;;
+    build)               cmd_build "$@" ;;
     setup)               cmd_setup "$@" ;;
     destroy)             cmd_destroy "$@" ;;
     help|--help|-h)      cmd_help ;;
