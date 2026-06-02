@@ -189,12 +189,12 @@ ARG AGENT_UID=1000
 ARG AGENT_GID=1000
 ARG DOCKER_GID=988
 
-# System packages via dnf:
-#   git, podman-remote, shadow-utils, ca-certificates — standard tools
-#   dnf-plugins-core + azure-cli — via Microsoft's official RPM repo
-RUN dnf install -y dnf-plugins-core \
-    && rpm --import https://packages.microsoft.com/keys/microsoft.asc \
-    && dnf config-manager --add-repo https://packages.microsoft.com/yumrepos/azure-cli \
+# System packages via dnf.
+# Azure CLI: write the .repo file directly — avoids dnf config-manager whose
+# --add-repo flag was removed in DNF5 (Fedora 41+).
+RUN rpm --import https://packages.microsoft.com/keys/microsoft.asc \
+    && printf '[azure-cli]\nname=Azure CLI\nbaseurl=https://packages.microsoft.com/yumrepos/azure-cli\nenabled=1\ngpgcheck=1\ngpgkey=https://packages.microsoft.com/keys/microsoft.asc\n' \
+       > /etc/yum.repos.d/azure-cli.repo \
     && dnf install -y \
            git \
            podman-remote \
