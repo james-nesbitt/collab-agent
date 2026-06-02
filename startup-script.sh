@@ -9,6 +9,10 @@ set -euo pipefail
 
 SENTINEL="/opt/omp-provisioned"
 OMP_DIR="/opt/omp-server"
+AGENT_USER="jnesbitt"
+AGENT_UID="1000"
+AGENT_GID="1000"
+AGENT_MOUNT_DIR="/home/${AGENT_USER}/mount"
 
 log() { echo "[startup-script] $*"; }
 
@@ -27,7 +31,22 @@ apt-get update -qq
 apt-get upgrade -y -qq
 
 # ---------------------------------------------------------------------------
-# 2. Install Docker CE (official repo)
+# 2. Create agent user
+#
+# UID/GID 1000 matches the local workstation so that files written inside the
+# container and on the host share the same numeric owner — no chown surprises
+# when moving files between the two.
+# ---------------------------------------------------------------------------
+log "Creating user ${AGENT_USER} (uid=${AGENT_UID}, gid=${AGENT_GID})…"
+if ! getent group "${AGENT_GID}" >/dev/null; then
+    groupadd -g "${AGENT_GID}" "${AGENT_USER}"
+fi
+if ! id -u "${AGENT_USER}" >/dev/null 2>&1; then
+    useradd -m -u "${AGENT_UID}" -g "${AGENT_GID}" -s /bin/bash "${AGENT_USER}"
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Install Docker CE (official repo)
 # ---------------------------------------------------------------------------
 log "Installing Docker CE…"
 apt-get install -y -qq ca-certificates curl gnupg lsb-release
@@ -54,66 +73,89 @@ apt-get install -y -qq \
 systemctl enable docker
 systemctl start docker
 
+# Grant the agent user access to the Docker socket via the docker group.
+usermod -aG docker "${AGENT_USER}"
+
 log "Docker installed: $(docker --version)"
+log "Docker GID: $(getent group docker | cut -d: -f3)"
 
 # ---------------------------------------------------------------------------
-# 3. Install Podman (host daemon, rootful socket)
+# 4. Install Podman (host daemon, user socket)
 #
-# The omp-server container mounts /run/podman/podman.sock and uses it as a
-# remote socket (CONTAINER_HOST). The daemon never runs inside the container.
+# We use the per-user Podman socket (/run/user/1000/podman/podman.sock) rather
+# than the rootful socket so the agent user owns the socket directly — no group
+# permission gymnastics required. Lingering ensures the user manager and its
+# socket start at boot without a login session.
 # ---------------------------------------------------------------------------
 log "Installing Podman…"
 apt-get install -y -qq podman
 
-systemctl enable podman.socket
-systemctl start podman.socket
+# Enable lingering so the user manager survives beyond login sessions and
+# starts automatically at boot.
+loginctl enable-linger "${AGENT_USER}"
+
+# Start the user manager now (linger triggers it on next boot; we need it now).
+systemctl start "user@${AGENT_UID}.service"
+
+# Give the user manager a moment to initialize its runtime directory.
+sleep 2
+
+# Enable and start the user Podman socket.
+XDG_RUNTIME_DIR="/run/user/${AGENT_UID}" \
+    runuser -u "${AGENT_USER}" -- \
+    systemctl --user enable --now podman.socket
 
 log "Podman installed: $(podman --version)"
-log "Podman socket: $(systemctl is-active podman.socket)"
+log "Podman socket: /run/user/${AGENT_UID}/podman/podman.sock"
 
 # ---------------------------------------------------------------------------
-# 4. Create omp-server directory and compose file
+# 5. Create omp-server directory, agent mount dir, and compose file
 # ---------------------------------------------------------------------------
-AGENT_MOUNT_DIR="/root/mount"
-
 log "Creating ${OMP_DIR} and ${AGENT_MOUNT_DIR}…"
 mkdir -p "${OMP_DIR}"
+
 # Shared filespace: the same absolute path must exist on the host and be
-# bind-mounted at that identical path inside the container. Never use ~ here.
+# bind-mounted at that identical path inside the container. docker/podman
+# -v flags using this path resolve correctly on the host daemon.
 mkdir -p "${AGENT_MOUNT_DIR}"
+chown "${AGENT_UID}:${AGENT_GID}" "${AGENT_MOUNT_DIR}"
 
 # docker-compose.yml — image reference is populated by setup-omp-server.sh
 # via the .env file; the compose file uses variable substitution.
-cat > "${OMP_DIR}/docker-compose.yml" << 'EOF'
+#
+# Note: DOCKER_GID is the GID of the docker group on this host. Docker CE on
+# Ubuntu 24.04 consistently assigns GID 999; captured here for the compose
+# group_add so the container process can reach the docker socket.
+DOCKER_GID=$(getent group docker | cut -d: -f3)
+
+cat > "${OMP_DIR}/docker-compose.yml" << EOF
 services:
   omp-server:
-    image: ${IMAGE_REPO}:${IMAGE_TAG}
+    image: \${IMAGE_REPO}:\${IMAGE_TAG}
     container_name: omp-server
     restart: unless-stopped
     privileged: true
+    user: "${AGENT_UID}:${AGENT_GID}"
+    group_add:
+      - "${DOCKER_GID}"
     ports:
       - "7077:7077"
     volumes:
       - omp-data:/data
       # Docker socket — agents talk to the host Docker daemon
       - /var/run/docker.sock:/var/run/docker.sock
-      # Podman socket — agents talk to the host Podman daemon (rootful)
-      - /run/podman/podman.sock:/run/podman/podman.sock
-      # Shared filespace — AGENT_MOUNT_DIR is the same absolute path on the
-      # host and inside the container. docker/podman -v flags using this path
-      # resolve correctly against the host daemon from anywhere.
+      # Podman user socket — owned by ${AGENT_USER}, no extra group needed
+      - /run/user/${AGENT_UID}/podman/podman.sock:/run/user/${AGENT_UID}/podman/podman.sock
+      # Shared filespace — identical absolute path on host and container
       - ${AGENT_MOUNT_DIR}:${AGENT_MOUNT_DIR}
     environment:
       OMP_SERVER_DATA_DIR: /data
       OMP_SERVER_PKI_DIR: /data/pki
       OMP_SERVER_PORT: "7077"
-      OMP_SERVER_URL: ${OMP_SERVER_URL}
-      OMP_SERVER_LOG_LEVEL: ${OMP_SERVER_LOG_LEVEL:-info}
-      # Point CLI tools at the host daemons via the mounted sockets
+      OMP_SERVER_URL: \${OMP_SERVER_URL}
+      OMP_SERVER_LOG_LEVEL: \${OMP_SERVER_LOG_LEVEL:-info}
       DOCKER_HOST: unix:///var/run/docker.sock
-      CONTAINER_HOST: unix:///run/podman/podman.sock
-      # Expose the shared mount path so agent code can reference it without
-      # hardcoding the directory
+      CONTAINER_HOST: unix:///run/user/${AGENT_UID}/podman/podman.sock
       AGENT_MOUNT_DIR: ${AGENT_MOUNT_DIR}
     healthcheck:
       test: ["CMD", "bun", "-e",
@@ -128,16 +170,18 @@ volumes:
 EOF
 
 # .env stub — populated by setup-omp-server.sh
-cat > "${OMP_DIR}/.env" << 'EOF'
+cat > "${OMP_DIR}/.env" << EOF
 # Populated by setup-omp-server.sh — do not hand-edit while container is running.
 IMAGE_REPO=ghcr.io/OWNER/omp-server
 IMAGE_TAG=latest
 OMP_SERVER_URL=
-AGENT_MOUNT_DIR=/root/mount
+AGENT_MOUNT_DIR=${AGENT_MOUNT_DIR}
 EOF
 
+chown -R "${AGENT_UID}:${AGENT_GID}" "${OMP_DIR}"
+
 # ---------------------------------------------------------------------------
-# 5. Write sentinel
+# 6. Write sentinel
 # ---------------------------------------------------------------------------
 touch "${SENTINEL}"
 log "Sentinel written to ${SENTINEL}."

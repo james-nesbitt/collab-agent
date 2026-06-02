@@ -113,7 +113,7 @@ cat > "${OMP_DIR}/.env" << EOF
 IMAGE_REPO=${IMAGE_REPO}
 IMAGE_TAG=${IMAGE_TAG}
 OMP_SERVER_URL=${OMP_SERVER_URL}
-AGENT_MOUNT_DIR=/root/mount
+AGENT_MOUNT_DIR=/home/jnesbitt/mount
 EOF
 
 # ---------------------------------------------------------------------------
@@ -123,7 +123,21 @@ log "Pulling ${IMAGE_REPO}:${IMAGE_TAG}…"
 docker pull "${IMAGE_REPO}:${IMAGE_TAG}"
 
 # ---------------------------------------------------------------------------
-# 4. Start container
+# 4. Initialise omp-data volume ownership
+#
+# Docker named volumes are created root:root. The server runs as uid=1000 and
+# cannot write to /data without this one-time fix. Using a minimal alpine
+# container avoids pulling the full omp-server image just for a chown.
+# ---------------------------------------------------------------------------
+log "Initialising omp-data volume ownership (uid=1000)…"
+docker volume create omp-data 2>/dev/null || true
+docker run --rm \
+    -v omp-data:/data \
+    alpine \
+    chown -R 1000:1000 /data
+
+# ---------------------------------------------------------------------------
+# 5. Start container
 # ---------------------------------------------------------------------------
 log "Starting omp-server via docker compose…"
 cd "${OMP_DIR}"

@@ -184,7 +184,24 @@ RUN set -eux \
 # uses Debian Bookworm, which satisfies this requirement). Tools that are
 # statically linked (terraform, packer, uv) work on any Linux base.
 # =============================================================================
+# Stage 2 — final image
+#
+# Assumes a Debian/glibc-based omp-server image (the oven/bun official image
+# uses Debian Bookworm, which satisfies this requirement). Tools that are
+# statically linked (terraform, packer, uv) work on any Linux base.
+#
+# Runs as uid=1000 (jnesbitt) matching the local workstation so file ownership
+# is consistent across host, container, and any spawned containers.
+# =============================================================================
 FROM ${OMP_BASE_REPO}:${OMP_BASE_TAG}
+
+# UID/GID must match the agent user on the host VM (jnesbitt, 1000:1000).
+# DOCKER_GID must match the docker group GID on the host; Docker CE on
+# Ubuntu 24.04 consistently assigns GID 999.
+ARG AGENT_USER=jnesbitt
+ARG AGENT_UID=1000
+ARG AGENT_GID=1000
+ARG DOCKER_GID=999
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -222,7 +239,23 @@ RUN ln -s /opt/azure-cli/bin/az /usr/local/bin/az
 # can call 'podman' without knowing about the remote variant
 RUN ln -s /usr/bin/podman-remote /usr/local/bin/podman
 
-# Smoke-test every tool — build fails here if any binary is broken or missing
+# Create the agent user with matching uid/gid.
+# Create a 'docker' group with the host's docker GID so the process can reach
+# /var/run/docker.sock (compose also passes group_add as a belt-and-suspenders).
+RUN groupadd -g "${AGENT_GID}" "${AGENT_USER}" 2>/dev/null || true \
+    && useradd -m -u "${AGENT_UID}" -g "${AGENT_GID}" -s /bin/bash "${AGENT_USER}" \
+    && groupadd -g "${DOCKER_GID}" docker 2>/dev/null || true \
+    && usermod -aG docker "${AGENT_USER}" \
+    # /app is the omp-server application directory (client bundles written here).
+    # /data is the runtime data volume mount point.
+    # Both must be writable by the agent user; /data ownership is also fixed at
+    # first run by setup-omp-server.sh for the named volume case.
+    && mkdir -p /app /data \
+    && chown -R "${AGENT_UID}:${AGENT_GID}" /app /data \
+    && chmod 755 /app /data
+
+# Smoke-test every tool as root before dropping privileges — build fails here
+# if any binary is broken or missing
 RUN terraform version \
     && packer version \
     && docker --version \
@@ -234,3 +267,5 @@ RUN terraform version \
     && podman --version \
     && node --version \
     && npm --version
+
+USER ${AGENT_USER}
