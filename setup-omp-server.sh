@@ -127,29 +127,48 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Initialise omp-data volume ownership
+# 4. Create volume and initialise PKI before starting the server
 #
-# Docker named volumes are created root:root. The server runs as uid=1000 and
-# cannot write to /data without this one-time fix. Using a minimal alpine
-# container avoids pulling the full omp-server image just for a chown.
+# The server exits immediately without PKI, making the container unhealthy
+# before we can exec into it. Run init as a one-off container against the
+# volume first, then compose up starts cleanly.
+#
+# Compose names volumes as <project>_<volume> where project = directory name.
+# Our compose dir is /opt/omp-server → project = omp-server → omp-server_omp-data.
 # ---------------------------------------------------------------------------
-log "Initialising omp-data volume ownership (uid=1000)…"
-docker volume create omp-data 2>/dev/null || true
+COMPOSE_PROJECT="omp-server"
+VOLUME_NAME="${COMPOSE_PROJECT}_omp-data"
+
+log "Creating volume ${VOLUME_NAME}…"
+docker volume create "${VOLUME_NAME}" 2>/dev/null || true
+
+log "Setting volume ownership to uid=1000…"
 docker run --rm \
-    -v omp-data:/data \
+    -v "${VOLUME_NAME}:/data" \
     alpine \
     chown -R 1000:1000 /data
 
+if docker run --rm \
+    -v "${VOLUME_NAME}:/data" \
+    -e OMP_SERVER_DATA_DIR=/data \
+    -e OMP_SERVER_PKI_DIR=/data/pki \
+    "${IMAGE_REPO}:${IMAGE_TAG}" \
+    bun run dist/main.js init "${OMP_HOSTNAME}" 2>/dev/null; then
+    log "PKI initialised for '${OMP_HOSTNAME}'."
+else
+    log "PKI already initialised or init skipped."
+fi
+
 # ---------------------------------------------------------------------------
-# 5. Start container
+# 5. Start container (PKI now exists, server will start cleanly)
 # ---------------------------------------------------------------------------
 log "Starting omp-server via docker compose…"
 cd "${OMP_DIR}"
 docker compose up -d
 
-# Wait for container to be healthy (up to 60 s)
+# Wait for container to be healthy (up to 90 s)
 log "Waiting for omp-server to become healthy…"
-for i in $(seq 1 12); do
+for i in $(seq 1 18); do
     status=$(docker inspect --format='{{.State.Health.Status}}' omp-server 2>/dev/null || true)
     if [[ "${status}" == "healthy" ]]; then
         log "Container is healthy."
@@ -159,21 +178,9 @@ for i in $(seq 1 12); do
         docker logs omp-server --tail 30
         die "Container entered unhealthy state. Check logs above."
     fi
-    log "  (${i}/12) status=${status:-starting} — waiting 5 s…"
+    log "  (${i}/18) status=${status:-starting} — waiting 5 s…"
     sleep 5
 done
-
-# ---------------------------------------------------------------------------
-# 5. Initialise PKI
-# ---------------------------------------------------------------------------
-# Only init if PKI doesn't already exist (idempotent guard).
-if docker exec omp-server test -f /data/pki/ca.crt 2>/dev/null; then
-    log "PKI already initialised — skipping init."
-else
-    log "Initialising PKI for hostname '${OMP_HOSTNAME}'…"
-    docker exec omp-server bun run dist/main.js init "${OMP_HOSTNAME}"
-    log "PKI initialised."
-fi
 
 # ---------------------------------------------------------------------------
 # 6. Register users
