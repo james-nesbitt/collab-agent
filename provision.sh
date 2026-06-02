@@ -11,7 +11,6 @@
 #   ./manage.sh connect     # SSH in and attach to a tmux session running omp
 #
 # Configuration (override via env):
-#   GCP_PROJECT          required
 #   INSTANCE_NAME        default: omp-agent
 #   ZONE                 default: europe-west1-b
 #   REGION               default: europe-west1
@@ -21,7 +20,7 @@
 #   STATIC_IP_NAME       default: omp-server-ip
 set -euo pipefail
 
-: "${GCP_PROJECT:?GCP_PROJECT must be set}"
+GCP_PROJECT="tools-348616"
 INSTANCE_NAME="${INSTANCE_NAME:-omp-agent}"
 ZONE="${ZONE:-europe-west1-b}"
 REGION="${REGION:-europe-west1}"
@@ -103,6 +102,6 @@ echo "  Zone      : ${ZONE}"
 echo "  Static IP : ${STATIC_IP}"
 echo ""
 echo "  Next steps:"
-echo "    GCP_PROJECT=${GCP_PROJECT} ./manage.sh bootstrap"
-echo "    GCP_PROJECT=${GCP_PROJECT} ./manage.sh connect"
+echo "    ./manage.sh bootstrap"
+echo "    ./manage.sh connect"
 echo "============================================================"

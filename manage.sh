@@ -18,7 +18,6 @@
 #   help                     Show this help
 #
 # Configuration (override via environment):
-#   GCP_PROJECT      (required)
 #   INSTANCE_NAME    (default: omp-agent)
 #   ZONE             (default: europe-west1-b)
 #   REGION           (default: europe-west1)
@@ -30,7 +29,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-: "${GCP_PROJECT:?GCP_PROJECT must be set}"
+GCP_PROJECT="tools-348616"
 INSTANCE_NAME="${INSTANCE_NAME:-omp-agent}"
 ZONE="${ZONE:-europe-west1-b}"
 REGION="${REGION:-europe-west1}"
