@@ -117,10 +117,14 @@ AGENT_MOUNT_DIR=/home/ubuntu/mount
 EOF
 
 # ---------------------------------------------------------------------------
-# 3. Pull image
+# 3. Pull image (skip if already present locally — e.g. built with manage.sh build)
 # ---------------------------------------------------------------------------
-log "Pulling ${IMAGE_REPO}:${IMAGE_TAG}…"
-docker pull "${IMAGE_REPO}:${IMAGE_TAG}"
+if docker image inspect "${IMAGE_REPO}:${IMAGE_TAG}" &>/dev/null; then
+    log "Image ${IMAGE_REPO}:${IMAGE_TAG} already present locally — skipping pull."
+else
+    log "Pulling ${IMAGE_REPO}:${IMAGE_TAG}…"
+    docker pull "${IMAGE_REPO}:${IMAGE_TAG}"
+fi
 
 # ---------------------------------------------------------------------------
 # 4. Initialise omp-data volume ownership
