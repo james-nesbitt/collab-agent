@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
-# manage.sh — Day-to-day operations for the omp-agent GCP instance.
+# manage.sh — Lifecycle management for the omp-agent GCP instance.
 #
 # Usage:
 #   ./manage.sh <subcommand> [args...]
 #
 # Subcommands:
+#   provision                Create the VM and reserve a static IP (run once)
 #   start                    Start the stopped instance
-#   stop                     Stop the running instance (data persists)
+#   stop                     Stop the running instance (disk persists)
 #   ssh [-- EXTRA_ARGS]      Open a plain SSH session on the instance
-#   connect [SESSION]        SSH in, attach to tmux session (default: "work"),
-#                            launching omp if the session is new
 #   bootstrap                Install tmux (system), mise + bun + omp (per-user).
 #                            Idempotent. Run once per OS-Login user.
 #   status                   Instance status and external IP
@@ -17,12 +16,17 @@
 #   destroy                  Tear down instance and static IP
 #   help                     Show this help
 #
+# For tmux session management on the VM, see ./session.sh.
+#
 # Configuration (override via environment):
 #   INSTANCE_NAME    (default: omp-agent)
 #   ZONE             (default: europe-west1-b)
 #   REGION           (default: europe-west1)
+#   MACHINE_TYPE     (default: e2-standard-4)        — only used by provision
+#   DISK_SIZE        (default: 200GB)                — only used by provision
+#   DISK_TYPE        (default: pd-balanced)          — only used by provision
 #   STATIC_IP_NAME   (default: omp-server-ip)
-#   FIREWALL_RULE    (default: allow-omp-server)
+#   FIREWALL_RULE    (default: allow-omp-server)     — legacy, cleaned on destroy
 #   USE_IAP          (default: true) — tunnel all SSH/SCP through IAP
 set -euo pipefail
 
@@ -33,9 +37,14 @@ GCP_PROJECT="tools-348616"
 INSTANCE_NAME="${INSTANCE_NAME:-omp-agent}"
 ZONE="${ZONE:-europe-west1-b}"
 REGION="${REGION:-europe-west1}"
+MACHINE_TYPE="${MACHINE_TYPE:-e2-standard-4}"
+DISK_SIZE="${DISK_SIZE:-200GB}"
+DISK_TYPE="${DISK_TYPE:-pd-balanced}"
 STATIC_IP_NAME="${STATIC_IP_NAME:-omp-server-ip}"
 FIREWALL_RULE="${FIREWALL_RULE:-allow-omp-server}"
 USE_IAP="${USE_IAP:-true}"
+IMAGE_FAMILY="ubuntu-2404-lts-amd64"
+IMAGE_PROJECT="ubuntu-os-cloud"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -43,12 +52,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Helpers
 # ---------------------------------------------------------------------------
 info() { echo "[manage] $*"; }
+warn() { echo "[manage] WARN: $*"; }
+ok()   { echo "[manage] OK: $*"; }
 die()  { echo "[manage] ERROR: $*" >&2; exit 1; }
 
-gcp_flags()  { echo "--project=${GCP_PROJECT} --zone=${ZONE}"; }
 iap_flag()   { [[ "${USE_IAP}" == "true" ]] && echo "--tunnel-through-iap" || echo ""; }
 
-# Wrappers that include IAP flag when enabled.
 gssh() {
     # gssh -- <remote-cmd>  or  gssh (interactive)
     gcloud compute ssh "${INSTANCE_NAME}" \
@@ -58,13 +67,12 @@ gssh() {
         "$@"
 }
 
-gscp() {
-    # gscp <src> <dst>
-    gcloud compute scp \
-        --project="${GCP_PROJECT}" \
-        --zone="${ZONE}" \
-        $(iap_flag) \
-        "$@"
+resource_exists() {
+    # resource_exists <gcloud subcommand> <name> [extra flags...]
+    local subcmd=$1; shift
+    local name=$1; shift
+    gcloud ${subcmd} describe "${name}" "$@" --project="${GCP_PROJECT}" \
+        --format="value(name)" 2>/dev/null | grep -q .
 }
 
 get_static_ip() {
@@ -90,6 +98,65 @@ require_running() {
 # ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
+cmd_provision() {
+    command -v gcloud >/dev/null || die "gcloud not found in PATH"
+
+    info "Project  : ${GCP_PROJECT}"
+    info "Instance : ${INSTANCE_NAME}"
+    info "Zone     : ${ZONE}"
+    info "Machine  : ${MACHINE_TYPE}"
+    info "Disk     : ${DISK_SIZE} ${DISK_TYPE}"
+
+    # 1. Reserve static external IP
+    if resource_exists "compute addresses" "${STATIC_IP_NAME}" --region="${REGION}"; then
+        warn "Static IP '${STATIC_IP_NAME}' already exists — skipping."
+    else
+        info "Reserving static IP '${STATIC_IP_NAME}' in region ${REGION}…"
+        gcloud compute addresses create "${STATIC_IP_NAME}" \
+            --project="${GCP_PROJECT}" \
+            --region="${REGION}" \
+            --network-tier=PREMIUM
+        ok "Static IP reserved."
+    fi
+
+    local static_ip
+    static_ip=$(get_static_ip)
+    info "Static IP: ${static_ip}"
+
+    # 2. Create VM
+    if resource_exists "compute instances" "${INSTANCE_NAME}" --zone="${ZONE}"; then
+        warn "Instance '${INSTANCE_NAME}' already exists — skipping VM creation."
+    else
+        info "Creating instance '${INSTANCE_NAME}'…"
+        gcloud compute instances create "${INSTANCE_NAME}" \
+            --project="${GCP_PROJECT}" \
+            --zone="${ZONE}" \
+            --machine-type="${MACHINE_TYPE}" \
+            --boot-disk-size="${DISK_SIZE}" \
+            --boot-disk-type="${DISK_TYPE}" \
+            --image-family="${IMAGE_FAMILY}" \
+            --image-project="${IMAGE_PROJECT}" \
+            --address="${static_ip}" \
+            --network-tier=PREMIUM \
+            --metadata="enable-oslogin=TRUE" \
+            --scopes=default
+        ok "Instance created."
+    fi
+
+    echo ""
+    echo "============================================================"
+    echo "  Provisioning complete"
+    echo "============================================================"
+    echo "  Instance  : ${INSTANCE_NAME}"
+    echo "  Zone      : ${ZONE}"
+    echo "  Static IP : ${static_ip}"
+    echo ""
+    echo "  Next steps:"
+    echo "    ./manage.sh bootstrap"
+    echo "    ./session.sh new work"
+    echo "============================================================"
+}
+
 cmd_start() {
     local status
     status=$(instance_status)
@@ -122,22 +189,6 @@ cmd_ssh() {
     require_running
     exec gssh "$@"
 }
-
-cmd_connect() {
-    require_running
-    local session="${1:-work}"
-    # tmux new -A: attach if session exists, create+run command if not.
-    # bash -lc: ensures ~/.profile is sourced so omp is on PATH (in case the
-    # session is brand new and tmux execs the command via /bin/sh which would
-    # otherwise miss the user's login environment).
-    exec gcloud compute ssh "${INSTANCE_NAME}" \
-        --project="${GCP_PROJECT}" \
-        --zone="${ZONE}" \
-        $(iap_flag) \
-        --ssh-flag='-t' \
-        --command="bash -lc 'tmux new -A -s ${session} omp'"
-}
-
 
 cmd_bootstrap() {
     require_running
@@ -183,10 +234,11 @@ tmux -V
 ~/.local/bin/mise exec bun -- bun --version
 PATH="$HOME/.bun/bin:$PATH" ~/.local/bin/mise exec bun -- omp --version
 BOOTSTRAP
-    info "Bootstrap complete. Run: ./manage.sh connect"
+    info "Bootstrap complete. Run: ./session.sh new work"
 }
+
 cmd_status() {
-    local status external_ip container_status
+    local status external_ip
     status=$(instance_status)
     external_ip=$(get_static_ip)
 
@@ -197,8 +249,7 @@ cmd_status() {
 
     if [[ "${status}" == "RUNNING" ]]; then
         echo ""
-        echo "Connect with:"
-        echo "  ./manage.sh connect"
+        echo "Manage tmux sessions with: ./session.sh"
     fi
 }
 
@@ -214,7 +265,7 @@ cmd_destroy() {
     echo "WARNING: This will permanently delete:"
     echo "  - Instance    : ${INSTANCE_NAME} (${ZONE})"
     echo "  - Static IP   : ${STATIC_IP_NAME} (${REGION})"
-    echo "  - Firewall    : ${FIREWALL_RULE}"
+    echo "  - Firewall    : ${FIREWALL_RULE} (legacy, if present)"
     echo ""
     read -r -p "Type 'yes' to confirm: " confirm
     [[ "${confirm}" == "yes" ]] || { info "Aborted."; exit 0; }
@@ -231,8 +282,7 @@ cmd_destroy() {
         info "Instance not found — skipping."
     fi
 
-    if gcloud compute addresses describe "${STATIC_IP_NAME}" \
-            --project="${GCP_PROJECT}" --region="${REGION}" &>/dev/null; then
+    if resource_exists "compute addresses" "${STATIC_IP_NAME}" --region="${REGION}"; then
         info "Releasing static IP '${STATIC_IP_NAME}'…"
         gcloud compute addresses delete "${STATIC_IP_NAME}" \
             --project="${GCP_PROJECT}" \
@@ -242,8 +292,7 @@ cmd_destroy() {
         info "Static IP not found — skipping."
     fi
 
-    if gcloud compute firewall-rules describe "${FIREWALL_RULE}" \
-            --project="${GCP_PROJECT}" &>/dev/null; then
+    if resource_exists "compute firewall-rules" "${FIREWALL_RULE}"; then
         info "Deleting firewall rule '${FIREWALL_RULE}'…"
         gcloud compute firewall-rules delete "${FIREWALL_RULE}" \
             --project="${GCP_PROJECT}" \
@@ -266,10 +315,10 @@ SUBCOMMAND="${1:-help}"
 shift 2>/dev/null || true
 
 case "${SUBCOMMAND}" in
+    provision)      cmd_provision "$@" ;;
     start)          cmd_start "$@" ;;
     stop)           cmd_stop "$@" ;;
     ssh)            cmd_ssh "$@" ;;
-    connect)        cmd_connect "$@" ;;
     bootstrap)      cmd_bootstrap "$@" ;;
     status)         cmd_status "$@" ;;
     ip)             cmd_ip "$@" ;;
