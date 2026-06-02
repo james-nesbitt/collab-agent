@@ -214,7 +214,7 @@ COPY --from=tool-installer /tools/packer      /usr/local/bin/packer
 COPY --from=tool-installer /tools/docker      /usr/local/bin/docker
 COPY --from=tool-installer /tools/uv          /usr/local/bin/uv
 COPY --from=tool-installer /tools/uvx         /usr/local/bin/uvx
-COPY --from=tool-installer /tools/aws         /usr/local/bin/aws
+# aws: symlink into /opt/aws-cli so the PyInstaller binary can find its dist/ sibling
 COPY --from=tool-installer /opt/aws-cli          /opt/aws-cli
 COPY --from=tool-installer /opt/google-cloud-sdk /opt/google-cloud-sdk
 COPY --from=tool-installer /opt/azure-cli        /opt/azure-cli
@@ -225,7 +225,8 @@ ENV OMP_SERVER_DATA_DIR=/data
 ENV PI_CODING_AGENT_DIR=/data/agent
 
 RUN ln -s /opt/azure-cli/bin/az /usr/local/bin/az \
-    && ln -s /usr/bin/podman-remote /usr/local/bin/podman
+    && ln -s /usr/bin/podman-remote /usr/local/bin/podman \
+    && ln -sf /opt/aws-cli/v2/current/bin/aws /usr/local/bin/aws
 
 # Agent user, docker group, ownership
 RUN groupadd -g "${AGENT_GID}" "${AGENT_USER}" 2>/dev/null || true \
