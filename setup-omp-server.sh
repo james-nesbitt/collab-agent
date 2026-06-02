@@ -113,7 +113,7 @@ cat > "${OMP_DIR}/.env" << EOF
 IMAGE_REPO=${IMAGE_REPO}
 IMAGE_TAG=${IMAGE_TAG}
 OMP_SERVER_URL=${OMP_SERVER_URL}
-AGENT_MOUNT_DIR=/home/jnesbitt/mount
+AGENT_MOUNT_DIR=/home/ubuntu/mount
 EOF
 
 # ---------------------------------------------------------------------------

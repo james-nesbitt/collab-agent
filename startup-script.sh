@@ -9,7 +9,7 @@ set -euo pipefail
 
 SENTINEL="/opt/omp-provisioned"
 OMP_DIR="/opt/omp-server"
-AGENT_USER="jnesbitt"
+AGENT_USER="ubuntu"
 AGENT_UID="1000"
 AGENT_GID="1000"
 AGENT_MOUNT_DIR="/home/${AGENT_USER}/mount"
@@ -30,20 +30,9 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get upgrade -y -qq
 
-# ---------------------------------------------------------------------------
-# 2. Create agent user
-#
-# UID/GID 1000 matches the local workstation so that files written inside the
-# container and on the host share the same numeric owner — no chown surprises
-# when moving files between the two.
-# ---------------------------------------------------------------------------
-log "Creating user ${AGENT_USER} (uid=${AGENT_UID}, gid=${AGENT_GID})…"
-if ! getent group "${AGENT_GID}" >/dev/null; then
-    groupadd -g "${AGENT_GID}" "${AGENT_USER}"
-fi
-if ! id -u "${AGENT_USER}" >/dev/null 2>&1; then
-    useradd -m -u "${AGENT_UID}" -g "${AGENT_GID}" -s /bin/bash "${AGENT_USER}"
-fi
+# The GCP Ubuntu 24.04 image ships with an 'ubuntu' user at UID/GID 1000.
+# We use it directly — no user creation needed.
+log "Using existing user ${AGENT_USER} (uid=${AGENT_UID}, gid=${AGENT_GID})"
 
 # ---------------------------------------------------------------------------
 # 3. Install Docker CE (official repo)

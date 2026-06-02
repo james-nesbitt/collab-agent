@@ -198,7 +198,7 @@ FROM ${OMP_BASE_REPO}:${OMP_BASE_TAG}
 # UID/GID must match the agent user on the host VM (jnesbitt, 1000:1000).
 # DOCKER_GID must match the docker group GID on the host; Docker CE on
 # Ubuntu 24.04 consistently assigns GID 999.
-ARG AGENT_USER=jnesbitt
+ARG AGENT_USER=ubuntu
 ARG AGENT_UID=1000
 ARG AGENT_GID=1000
 ARG DOCKER_GID=999
