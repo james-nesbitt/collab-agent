@@ -26,6 +26,7 @@
 #   REGION           (default: europe-west1)
 #   STATIC_IP_NAME   (default: omp-server-ip)
 #   FIREWALL_RULE    (default: allow-omp-server)
+#   USE_IAP          (default: true) — tunnel all SSH/SCP through IAP
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -37,6 +38,7 @@ ZONE="${ZONE:-europe-west1-b}"
 REGION="${REGION:-europe-west1}"
 STATIC_IP_NAME="${STATIC_IP_NAME:-omp-server-ip}"
 FIREWALL_RULE="${FIREWALL_RULE:-allow-omp-server}"
+USE_IAP="${USE_IAP:-true}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -46,7 +48,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 info() { echo "[manage] $*"; }
 die()  { echo "[manage] ERROR: $*" >&2; exit 1; }
 
-gcp_flags() { echo "--project=${GCP_PROJECT} --zone=${ZONE}"; }
+gcp_flags()  { echo "--project=${GCP_PROJECT} --zone=${ZONE}"; }
+iap_flag()   { [[ "${USE_IAP}" == "true" ]] && echo "--tunnel-through-iap" || echo ""; }
+
+# Wrappers that include IAP flag when enabled.
+gssh() {
+    # gssh -- <remote-cmd>  or  gssh (interactive)
+    gcloud compute ssh "${INSTANCE_NAME}" \
+        --project="${GCP_PROJECT}" \
+        --zone="${ZONE}" \
+        $(iap_flag) \
+        "$@"
+}
+
+gscp() {
+    # gscp <src> <dst>
+    gcloud compute scp \
+        --project="${GCP_PROJECT}" \
+        --zone="${ZONE}" \
+        $(iap_flag) \
+        "$@"
+}
 
 get_static_ip() {
     gcloud compute addresses describe "${STATIC_IP_NAME}" \
@@ -57,7 +79,8 @@ get_static_ip() {
 
 instance_status() {
     gcloud compute instances describe "${INSTANCE_NAME}" \
-        $(gcp_flags) \
+        --project="${GCP_PROJECT}" \
+        --zone="${ZONE}" \
         --format="value(status)" 2>/dev/null || echo "NOT_FOUND"
 }
 
@@ -65,14 +88,6 @@ require_running() {
     local status
     status=$(instance_status)
     [[ "${status}" == "RUNNING" ]] || die "Instance is not running (status: ${status}). Run: ./manage.sh start"
-}
-
-ssh_cmd() {
-    # Emit the base gcloud ssh command as array elements.
-    # Caller appends -- <remote command> or extra flags.
-    echo gcloud compute ssh "${INSTANCE_NAME}" \
-        --project="${GCP_PROJECT}" \
-        --zone="${ZONE}"
 }
 
 # ---------------------------------------------------------------------------
@@ -108,10 +123,7 @@ cmd_stop() {
 
 cmd_ssh() {
     require_running
-    exec gcloud compute ssh "${INSTANCE_NAME}" \
-        --project="${GCP_PROJECT}" \
-        --zone="${ZONE}" \
-        "$@"
+    exec gssh "$@"
 }
 
 cmd_status() {
@@ -127,10 +139,8 @@ cmd_status() {
     if [[ "${status}" == "RUNNING" ]]; then
         echo ""
         echo "Container health (via SSH):"
-        gcloud compute ssh "${INSTANCE_NAME}" \
-            --project="${GCP_PROJECT}" \
-            --zone="${ZONE}" \
-            -- docker ps --filter name=omp-server --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" \
+        gssh -- docker ps --filter name=omp-server \
+            --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" \
             2>/dev/null || echo "  (SSH not yet available)"
     fi
 }
@@ -138,10 +148,7 @@ cmd_status() {
 cmd_logs() {
     require_running
     info "Tailing omp-server logs (Ctrl-C to stop)…"
-    gcloud compute ssh "${INSTANCE_NAME}" \
-        --project="${GCP_PROJECT}" \
-        --zone="${ZONE}" \
-        -- docker logs omp-server -f "$@"
+    gssh -- docker logs omp-server -f "$@"
 }
 
 cmd_ip() {
@@ -162,10 +169,7 @@ cmd_get_client_bundle() {
     mkdir -p "${dest}"
 
     info "Copying ${user}.omp-client from instance…"
-    gcloud compute scp \
-        --project="${GCP_PROJECT}" \
-        --zone="${ZONE}" \
-        --recurse \
+    gscp --recurse \
         "${INSTANCE_NAME}:/tmp/omp-clients/${user}.omp-client" \
         "${dest}/${user}.omp-client"
 
@@ -177,17 +181,10 @@ cmd_setup() {
     local remote_script="/tmp/setup-omp-server.sh"
 
     info "Copying setup-omp-server.sh to instance…"
-    gcloud compute scp \
-        --project="${GCP_PROJECT}" \
-        --zone="${ZONE}" \
-        "${SCRIPT_DIR}/setup-omp-server.sh" \
-        "${INSTANCE_NAME}:${remote_script}"
+    gscp "${SCRIPT_DIR}/setup-omp-server.sh" "${INSTANCE_NAME}:${remote_script}"
 
     info "Running setup on instance…"
-    gcloud compute ssh "${INSTANCE_NAME}" \
-        --project="${GCP_PROJECT}" \
-        --zone="${ZONE}" \
-        -- sudo bash "${remote_script}" "$@"
+    gssh -- sudo bash "${remote_script}" "$@"
 }
 
 cmd_build() {
@@ -195,39 +192,58 @@ cmd_build() {
     local image_tag="${1:-latest}"
     local image_repo="omp-server-agent"
     local remote_dir="/tmp/omp-build"
+    local build_log="${remote_dir}/build.log"
 
     info "Copying build context to instance…"
-    gcloud compute ssh "${INSTANCE_NAME}" \
-        --project="${GCP_PROJECT}" \
-        --zone="${ZONE}" \
-        -- mkdir -p "${remote_dir}"
-
-    gcloud compute scp \
-        --project="${GCP_PROJECT}" \
-        --zone="${ZONE}" \
-        "${SCRIPT_DIR}/Dockerfile" \
-        "${SCRIPT_DIR}/build-image.sh" \
+    gssh -- mkdir -p "${remote_dir}"
+    gscp "${SCRIPT_DIR}/Dockerfile" "${SCRIPT_DIR}/build-image.sh" \
         "${INSTANCE_NAME}:${remote_dir}/"
 
-    info "Building ${image_repo}:${image_tag} on instance (first build ~10-15 min)…"
-    gcloud compute ssh "${INSTANCE_NAME}" \
-        --project="${GCP_PROJECT}" \
-        --zone="${ZONE}" \
-        -- bash "${remote_dir}/build-image.sh" \
-             --output-repo "${image_repo}" \
-             --tag "${image_tag}"
+    # Query the real docker GID so the image grants socket access correctly.
+    local docker_gid
+    docker_gid=$(gssh -- getent group docker 2>/dev/null | cut -d: -f3)
+    info "Docker GID on host: ${docker_gid}"
 
-    # Update .env so the next `docker compose up` uses the freshly built image.
+    # Run the build detached on the VM so SSH disconnections don't abort it.
+    info "Starting build on instance (first build ~15 min)…"
+    gssh -- "nohup bash ${remote_dir}/build-image.sh \
+                --output-repo ${image_repo} \
+                --tag ${image_tag} \
+                --build-arg DOCKER_GID=${docker_gid} \
+                > ${build_log} 2>&1 & echo \$! > ${remote_dir}/build.pid
+              echo 'Build PID:' \$(cat ${remote_dir}/build.pid)"
+
+    # Tail the log; loop until the build process exits.
+    info "Streaming build log (reconnects if SSH drops)…"
+    local pid
+    while true; do
+        pid=$(gssh -- "cat ${remote_dir}/build.pid 2>/dev/null" 2>/dev/null || true)
+        [[ -z "${pid}" ]] && { info "Build PID not found — may have already finished."; break; }
+        # Tail and exit when the build process is gone
+        gssh -- "tail -n +1 -f ${build_log} &
+                 TAIL=\$!
+                 while kill -0 ${pid} 2>/dev/null; do sleep 3; done
+                 sleep 1; kill \$TAIL 2>/dev/null; wait \$TAIL 2>/dev/null" && break || true
+        info "SSH dropped — reconnecting…"
+        sleep 5
+    done
+
+    # Check exit status of the build.
+    local exit_code
+    exit_code=$(gssh -- "wait ${pid} 2>/dev/null; echo \$?" 2>/dev/null || echo "unknown")
+    if [[ "${exit_code}" != "0" && "${exit_code}" != "unknown" ]]; then
+        gssh -- "tail -30 ${build_log}" 2>/dev/null || true
+        die "Build failed (exit ${exit_code}). See log above."
+    fi
+
+    # Update .env so the next compose up uses the freshly built image.
     info "Updating /opt/omp-server/.env…"
-    gcloud compute ssh "${INSTANCE_NAME}" \
-        --project="${GCP_PROJECT}" \
-        --zone="${ZONE}" \
-        -- "sudo sed -i 's|^IMAGE_REPO=.*|IMAGE_REPO=${image_repo}|' /opt/omp-server/.env \
-            && sudo sed -i 's|^IMAGE_TAG=.*|IMAGE_TAG=${image_tag}|' /opt/omp-server/.env"
+    gssh -- "sudo sed -i 's|^IMAGE_REPO=.*|IMAGE_REPO=${image_repo}|' /opt/omp-server/.env \
+             && sudo sed -i 's|^IMAGE_TAG=.*|IMAGE_TAG=${image_tag}|' /opt/omp-server/.env"
 
     echo ""
-    echo "  Image built: ${image_repo}:${image_tag}"
-    echo "  To apply:    ./manage.sh ssh -- sudo docker compose -f /opt/omp-server/docker-compose.yml up -d"
+    echo "  Image built : ${image_repo}:${image_tag}"
+    echo "  Apply with  : GCP_PROJECT=${GCP_PROJECT} ./manage.sh setup -- --image ${image_repo}:${image_tag} --user <USER>"
 }
 
 cmd_destroy() {

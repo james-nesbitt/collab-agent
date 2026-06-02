@@ -42,7 +42,8 @@ PLATFORM="linux/amd64"
 OUTPUT_TAG="${OUTPUT_TAG:-latest}"
 BASE_REPO="${BASE_REPO:-ghcr.io/OWNER/omp-server}"
 BASE_TAG="${BASE_TAG:-latest}"
-OUTPUT_REPO="${OUTPUT_REPO:-ghcr.io/OWNER/omp-server-agent}"
+OUTPUT_REPO="${OUTPUT_REPO:-omp-server-agent}"
+EXTRA_BUILD_ARGS=()
 
 # Tool version defaults (can be overridden via env)
 TERRAFORM_VERSION="${TERRAFORM_VERSION:-1.10.5}"
@@ -64,6 +65,7 @@ while [[ $# -gt 0 ]]; do
         --base-repo)   shift; BASE_REPO="$1" ;;
         --base-tag)    shift; BASE_TAG="$1" ;;
         --output-repo) shift; OUTPUT_REPO="$1" ;;
+        --build-arg)   shift; EXTRA_BUILD_ARGS+=("--build-arg" "$1") ;;
         --help|-h)
             sed -n '2,/^set -/p' "$0" | grep '^#' | sed 's/^# \?//'
             exit 0
@@ -128,6 +130,7 @@ fi
 
 docker buildx build \
     "${BUILD_ARGS[@]}" \
+    "${EXTRA_BUILD_ARGS[@]}" \
     --platform "${PLATFORM}" \
     --tag "${FULL_IMAGE}" \
     "${OUTPUT_FLAGS[@]}" \
