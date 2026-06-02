@@ -178,7 +178,7 @@ RUN set -eux \
     && mv "/opt/node-v${NODE_VERSION}-linux-${nodearch}" /opt/nodejs \
     && rm /tmp/node.tar.gz \
     && /opt/nodejs/bin/node --version \
-    && /opt/nodejs/bin/npm --version
+    && PATH="/opt/nodejs/bin:${PATH}" /opt/nodejs/bin/npm --version
 
 # =============================================================================
 # Stage 3 — final (Fedora)
