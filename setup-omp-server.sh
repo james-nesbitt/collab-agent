@@ -9,7 +9,7 @@
 #   ./setup-omp-server.sh [OPTIONS]
 #
 # Options:
-#   --image  IMAGE_REPO:TAG   Full image reference (default: registry.ci.mirantis.com/jnesbitt/omp-server:latest)
+#   --image  IMAGE_REPO:TAG   Full image reference (default: ghcr.io/OWNER/omp-server:latest)
 #   --user   USERNAME         Register this user after PKI init (can repeat)
 #   --ghcr-token TOKEN        GitHub PAT with read:packages scope (only if image is private)
 #   --hostname HOSTNAME       Hostname baked into PKI and client bundles
@@ -24,7 +24,7 @@ set -euo pipefail
 OMP_DIR="/opt/omp-server"
 CLIENTS_DIR="/tmp/omp-clients"
 HOSTNAME_OVERRIDE=""
-IMAGE_REPO="registry.ci.mirantis.com/jnesbitt/omp-server"
+IMAGE_REPO="ghcr.io/OWNER/omp-server"
 IMAGE_TAG="latest"
 GHCR_TOKEN=""
 USERS=()

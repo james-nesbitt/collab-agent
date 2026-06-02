@@ -161,7 +161,7 @@ EOF
 # .env stub — populated by setup-omp-server.sh
 cat > "${OMP_DIR}/.env" << EOF
 # Populated by setup-omp-server.sh — do not hand-edit while container is running.
-IMAGE_REPO=registry.ci.mirantis.com/jnesbitt/omp-server
+IMAGE_REPO=ghcr.io/OWNER/omp-server
 IMAGE_TAG=latest
 OMP_SERVER_URL=
 AGENT_MOUNT_DIR=${AGENT_MOUNT_DIR}
