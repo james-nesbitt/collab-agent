@@ -11,10 +11,12 @@
 #   status                   Instance status, external IP, and container health
 #   logs [-- EXTRA_ARGS]     Tail omp-server container logs (Ctrl-C to stop)
 #   ip                       Print the reserved static external IP
-#   get-client-bundle USER   SCP client bundle to ./clients/<USER>.omp-client/
-#   build [TAG]              Build the agent image on the instance (default tag: latest)
-#                            Copies Dockerfile + build-image.sh, runs build remotely,
-#                            updates /opt/omp-server/.env. No registry required.
+#   build [OPTIONS]          Build the agent image on the remote instance.
+#                            Transfers the local omp-server image to the VM
+#                            via docker save|load (no registry needed), then
+#                            runs docker buildx build on the VM.
+#     --omp-image REPO:TAG   Local omp-server image to transfer (required)
+#     --tag TAG              Output image tag (default: latest)
 #   setup [-- EXTRA_ARGS]    Run setup-omp-server.sh on the instance via SSH
 #   destroy                  Tear down instance, static IP, and firewall rule
 #   help                     Show this help
@@ -189,10 +191,36 @@ cmd_setup() {
 
 cmd_build() {
     require_running
-    local image_tag="${1:-latest}"
+    local image_tag="latest"
     local image_repo="omp-server-agent"
     local remote_dir="/tmp/omp-build"
     local build_log="${remote_dir}/build.log"
+    local omp_image=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --tag)        shift; image_tag="$1" ;;
+            --omp-image)  shift; omp_image="$1" ;;
+        esac
+        shift
+    done
+
+    [[ -n "${omp_image}" ]] || die "Specify the local omp-server image with --omp-image REPO:TAG"
+
+    # Parse repo and tag from the omp_image argument.
+    local omp_repo="${omp_image%%:*}"
+    local omp_tag="${omp_image##*:}"
+    [[ "${omp_repo}" == "${omp_tag}" ]] && omp_tag="latest"   # no colon given
+
+    # Transfer the local omp-server image to the VM via docker save|load.
+    # This avoids needing registry credentials on the remote host.
+    info "Transferring ${omp_image} to instance (this may take a minute)…"
+    docker save "${omp_image}" \
+        | gcloud compute ssh "${INSTANCE_NAME}" \
+              --project="${GCP_PROJECT}" \
+              --zone="${ZONE}" \
+              $(iap_flag) \
+              -- sudo docker load
 
     info "Copying build context to instance…"
     gssh -- mkdir -p "${remote_dir}"
@@ -209,6 +237,8 @@ cmd_build() {
     gssh -- "sudo nohup bash ${remote_dir}/build-image.sh \
                 --output-repo ${image_repo} \
                 --tag ${image_tag} \
+                --build-arg OMP_BASE_REPO=${omp_repo} \
+                --build-arg OMP_BASE_TAG=${omp_tag} \
                 --build-arg DOCKER_GID=${docker_gid} \
                 > ${build_log} 2>&1 & echo \$! > ${remote_dir}/build.pid
               echo 'Build PID:' \$(cat ${remote_dir}/build.pid)"
@@ -219,7 +249,6 @@ cmd_build() {
     while true; do
         pid=$(gssh -- "cat ${remote_dir}/build.pid 2>/dev/null" 2>/dev/null || true)
         [[ -z "${pid}" ]] && { info "Build PID not found — may have already finished."; break; }
-        # Tail and exit when the build process is gone
         gssh -- "tail -n +1 -f ${build_log} &
                  TAIL=\$!
                  while kill -0 ${pid} 2>/dev/null; do sleep 3; done
