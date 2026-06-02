@@ -168,15 +168,16 @@ cmd_get_client_bundle() {
     [[ -n "${user}" ]] || die "Usage: ./manage.sh get-client-bundle <USER>"
     require_running
 
-    local dest="${SCRIPT_DIR}/clients"
-    mkdir -p "${dest}"
+    local dest="${SCRIPT_DIR}/clients/${user}.omp-client"
+    rm -rf "${dest}"
+    mkdir -p "${SCRIPT_DIR}/clients"
 
     info "Copying ${user}.omp-client from instance…"
     gscp --recurse \
         "${INSTANCE_NAME}:/tmp/omp-clients/${user}.omp-client" \
-        "${dest}/${user}.omp-client"
+        "${SCRIPT_DIR}/clients/"
 
-    info "Bundle saved to: ${dest}/${user}.omp-client"
+    info "Bundle saved to: ${dest}"
 }
 
 cmd_setup() {
