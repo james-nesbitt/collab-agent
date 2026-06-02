@@ -158,11 +158,10 @@ RUN set -eux \
        --quiet --usage-reporting=false --command-completion=false --path-update=false \
     && /opt/google-cloud-sdk/bin/gcloud --version
 
-# --- Azure CLI (pip venv) ---
-RUN python3 -m venv /opt/azure-cli \
-    && /opt/azure-cli/bin/pip install --quiet --upgrade pip \
-    && /opt/azure-cli/bin/pip install --quiet azure-cli \
-    && /opt/azure-cli/bin/az --version
+# --- Azure CLI ---
+# Skipped in installer stage: pip venv built on Ubuntu can't be copied to Fedora
+# (Python site-packages paths diverge). Installed via Microsoft's RPM repo in
+# the final stage instead.
 
 # --- Node.js + npm ---
 RUN set -eux \
@@ -190,12 +189,18 @@ ARG AGENT_UID=1000
 ARG AGENT_GID=1000
 ARG DOCKER_GID=988
 
-# System packages via dnf
-RUN dnf install -y \
-        git \
-        podman-remote \
-        shadow-utils \
-        ca-certificates \
+# System packages via dnf:
+#   git, podman-remote, shadow-utils, ca-certificates — standard tools
+#   dnf-plugins-core + azure-cli — via Microsoft's official RPM repo
+RUN dnf install -y dnf-plugins-core \
+    && rpm --import https://packages.microsoft.com/keys/microsoft.asc \
+    && dnf config-manager --add-repo https://packages.microsoft.com/yumrepos/azure-cli \
+    && dnf install -y \
+           git \
+           podman-remote \
+           shadow-utils \
+           ca-certificates \
+           azure-cli \
     && dnf clean all
 
 # --- omp-server application ---
@@ -217,15 +222,13 @@ COPY --from=tool-installer /tools/uvx         /usr/local/bin/uvx
 # aws: symlink into /opt/aws-cli so the PyInstaller binary can find its dist/ sibling
 COPY --from=tool-installer /opt/aws-cli          /opt/aws-cli
 COPY --from=tool-installer /opt/google-cloud-sdk /opt/google-cloud-sdk
-COPY --from=tool-installer /opt/azure-cli        /opt/azure-cli
 COPY --from=tool-installer /opt/nodejs           /opt/nodejs
 
-ENV PATH="/opt/google-cloud-sdk/bin:/opt/nodejs/bin:/opt/azure-cli/bin:${PATH}"
+ENV PATH="/opt/google-cloud-sdk/bin:/opt/nodejs/bin:${PATH}"
 ENV OMP_SERVER_DATA_DIR=/data
 ENV PI_CODING_AGENT_DIR=/data/agent
 
-RUN ln -s /opt/azure-cli/bin/az /usr/local/bin/az \
-    && ln -s /usr/bin/podman-remote /usr/local/bin/podman \
+RUN ln -s /usr/bin/podman-remote /usr/local/bin/podman \
     && ln -sf /opt/aws-cli/v2/current/bin/aws /usr/local/bin/aws
 
 # Agent user, docker group, ownership
