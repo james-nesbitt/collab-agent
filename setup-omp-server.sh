@@ -136,34 +136,29 @@ fi
 # Compose names volumes as <project>_<volume> where project = directory name.
 # Our compose dir is /opt/omp-server → project = omp-server → omp-server_omp-data.
 # ---------------------------------------------------------------------------
-COMPOSE_PROJECT="omp-server"
-VOLUME_NAME="${COMPOSE_PROJECT}_omp-data"
+# Using docker compose run for pre-start tasks:
+# - It uses the compose-managed volume (no naming conflicts)
+# - It uses the image's ENTRYPOINT, so we pass only the sub-command as args
+#   (ENTRYPOINT=["bun","run","dist/main.js"], so `init HOST` → correct call)
+# ---------------------------------------------------------------------------
+cd "${OMP_DIR}"
 
-log "Creating volume ${VOLUME_NAME}…"
-docker volume create "${VOLUME_NAME}" 2>/dev/null || true
+log "Setting /data ownership to uid=1000 via compose run…"
+docker compose run --rm --no-deps --user root \
+    --entrypoint sh omp-server \
+    -c "chown -R 1000:1000 /data"
 
-log "Setting volume ownership to uid=1000…"
-docker run --rm \
-    -v "${VOLUME_NAME}:/data" \
-    alpine \
-    chown -R 1000:1000 /data
-
-if docker run --rm \
-    -v "${VOLUME_NAME}:/data" \
-    -e OMP_SERVER_DATA_DIR=/data \
-    -e OMP_SERVER_PKI_DIR=/data/pki \
-    "${IMAGE_REPO}:${IMAGE_TAG}" \
-    bun run dist/main.js init "${OMP_HOSTNAME}" 2>/dev/null; then
-    log "PKI initialised for '${OMP_HOSTNAME}'."
+log "Initialising PKI for '${OMP_HOSTNAME}'…"
+if docker compose run --rm --no-deps omp-server init "${OMP_HOSTNAME}"; then
+    log "PKI initialised."
 else
-    log "PKI already initialised or init skipped."
+    log "PKI already initialised or init returned non-zero — continuing."
 fi
 
 # ---------------------------------------------------------------------------
 # 5. Start container (PKI now exists, server will start cleanly)
 # ---------------------------------------------------------------------------
 log "Starting omp-server via docker compose…"
-cd "${OMP_DIR}"
 docker compose up -d
 
 # Wait for container to be healthy (up to 90 s)
