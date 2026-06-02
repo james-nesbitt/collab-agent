@@ -190,6 +190,7 @@ for user in "${USERS[@]}"; do
     docker cp "omp-server:/app/.clients/${user}.omp-client" "${CLIENTS_DIR}/${user}.omp-client"
     log "  Bundle: ${CLIENTS_DIR}/${user}.omp-client"
 done
+chmod -R a+rX "${CLIENTS_DIR}" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Done
