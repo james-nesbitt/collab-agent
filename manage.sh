@@ -238,22 +238,22 @@ cmd_build() {
 
     # Run the build detached so SSH disconnections don't abort it.
     info "Starting build on instance (first build ~15 min)…"
-    gssh -- "sudo nohup bash ${remote_dir}/build-image.sh \
+    gssh -- "sudo bash -c 'nohup bash ${remote_dir}/build-image.sh \
                 --output-repo ${image_repo} \
                 --tag ${image_tag} \
                 --build-arg DOCKER_GID=${docker_gid} \
                 > ${build_log} 2>&1 & echo \$! > ${remote_dir}/build.pid
-              echo 'Build PID:' \$(cat ${remote_dir}/build.pid)"
+              echo Build PID: \$(cat ${remote_dir}/build.pid)'"
 
     # Tail the log; reconnect if SSH drops.
     info "Streaming build log (reconnects if SSH drops)…"
     local pid
     while true; do
-        pid=$(gssh -- "cat ${remote_dir}/build.pid 2>/dev/null" 2>/dev/null || true)
+        pid=$(gssh -- "sudo cat ${remote_dir}/build.pid 2>/dev/null" 2>/dev/null || true)
         [[ -z "${pid}" ]] && { info "Build PID not found — may have already finished."; break; }
-        gssh -- "tail -n +1 -f ${build_log} &
+        gssh -- "sudo tail -n +1 -f ${build_log} &
                  TAIL=\$!
-                 while kill -0 ${pid} 2>/dev/null; do sleep 3; done
+                 while sudo kill -0 \$(sudo cat ${remote_dir}/build.pid 2>/dev/null) 2>/dev/null; do sleep 3; done
                  sleep 1; kill \$TAIL 2>/dev/null; wait \$TAIL 2>/dev/null" && break || true
         info "SSH dropped — reconnecting…"
         sleep 5
@@ -261,9 +261,9 @@ cmd_build() {
 
     # Check exit status.
     local exit_code
-    exit_code=$(gssh -- "wait ${pid} 2>/dev/null; echo \$?" 2>/dev/null || echo "unknown")
+    exit_code=$(gssh -- "sudo cat ${remote_dir}/build.pid 2>/dev/null | xargs -r sudo wait 2>/dev/null; echo \$?" 2>/dev/null || echo "unknown")
     if [[ "${exit_code}" != "0" && "${exit_code}" != "unknown" ]]; then
-        gssh -- "tail -30 ${build_log}" 2>/dev/null || true
+        gssh -- "sudo tail -30 ${build_log}" 2>/dev/null || true
         die "Build failed (exit ${exit_code}). See log above."
     fi
 
