@@ -187,7 +187,11 @@ cmd_stop() {
 
 cmd_ssh() {
     require_running
-    exec gssh "$@"
+    exec gcloud compute ssh "${INSTANCE_NAME}" \
+        --project="${GCP_PROJECT}" \
+        --zone="${ZONE}" \
+        $(iap_flag) \
+        "$@"
 }
 
 cmd_bootstrap() {
