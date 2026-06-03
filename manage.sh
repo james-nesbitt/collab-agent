@@ -203,10 +203,31 @@ cmd_bootstrap() {
 set -e
 echo "[bootstrap] user: $(whoami)"
 
-# tmux (system)
-if ! command -v tmux >/dev/null; then
-  sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux curl unzip git
+# tmux (system) + rootless-podman runtime deps
+# - podman: container runtime
+# - slirp4netns: rootless networking
+# - fuse-overlayfs: rootless overlay storage driver
+# - uidmap: newuidmap/newgidmap binaries used by user namespaces
+missing=()
+for pkg in tmux curl unzip git podman slirp4netns fuse-overlayfs uidmap; do
+    dpkg -s "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+done
+if [ ${#missing[@]} -gt 0 ]; then
+    sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}"
+fi
+
+# /etc/subuid + /etc/subgid: rootless podman needs a UID/GID range for the
+# current user. OS Login creates users dynamically without these, so add them
+# idempotently. Range start is offset by 100000 per existing entry to avoid
+# overlap with the default 'ubuntu' user.
+me=$(whoami)
+if ! grep -q "^${me}:" /etc/subuid; then
+    start=$(( 100000 + 65536 * ($(wc -l < /etc/subuid) + 1) ))
+    sudo usermod --add-subuids ${start}-$((start + 65535)) \
+                 --add-subgids ${start}-$((start + 65535)) "${me}"
+    # Tell podman to rebuild its rootless storage with the new IDs.
+    podman system migrate >/dev/null 2>&1 || true
 fi
 
 # mise (user)
