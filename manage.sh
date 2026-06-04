@@ -230,6 +230,12 @@ if ! grep -q "^${me}:" /etc/subuid; then
     podman system migrate >/dev/null 2>&1 || true
 fi
 
+# docker group: add user so docker CLI works without sudo.
+# The group is created by Docker CE at install time.
+if getent group docker >/dev/null && ! id -nG "${me}" | grep -qw docker; then
+    sudo usermod -aG docker "${me}"
+fi
+
 # mise (user)
 if [ ! -x ~/.local/bin/mise ]; then
   curl -fsSL https://mise.run | sh
