@@ -32,7 +32,7 @@ zone, and static IP, plus the next steps.
 ./administrator.sh bootstrap
 ```
 
-This installs system tmux and the rootless-container deps, then mise/bun/omp into your
+This installs system tmux and the rootless-container deps, then mise/bun/omp/gh into your
 OS-Login user's home. Run it **once per OS-Login user**; it's idempotent, so re-running
 is safe. At the end it prints the installed tool versions — confirm `omp --version`
 shows up.

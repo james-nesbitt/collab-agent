@@ -210,6 +210,10 @@ grep -q 'mise activate' ~/.bashrc 2>/dev/null || \
 # bun via mise
 ~/.local/bin/mise use -g bun@latest >/dev/null
 
+# gh (GitHub CLI) via mise — used by the github skill (REST/PR ops) and the
+# commit-push-pr command. Installs into the user's mise shims (no apt repo).
+~/.local/bin/mise use -g gh@latest >/dev/null
+
 # omp via bun
 ~/.local/bin/mise exec bun -- bun install -g @oh-my-pi/pi-coding-agent
 
@@ -219,6 +223,7 @@ tmux -V
 ~/.local/bin/mise --version
 ~/.local/bin/mise exec bun -- bun --version
 PATH="$HOME/.bun/bin:$PATH" ~/.local/bin/mise exec bun -- omp --version
+~/.local/bin/mise exec gh -- gh --version | head -1
 BOOTSTRAP
     info "Bootstrap complete. Run: ./manager.sh setup, then ./manager.sh new work"
 }

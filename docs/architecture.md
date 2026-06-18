@@ -28,8 +28,8 @@ a headless programmatic-control protocol (the manager drives the interactive TUI
 
 | Role | Surface | Owns |
 | --- | --- | --- |
-| **Administrator** | `administrator.sh` | GCP/VM lifecycle: provision, start/stop, bootstrap (OS packages + mise/bun/omp), ssh, destroy. |
-| **Manager** | `manager.sh` | VM-wide omp platform config (global `secrets.enabled`, global `RULES.md`/`AGENTS.md` + behaviour/safety `rules/` + the `commit-push-pr` command + `secrets.yml` + the `credential-access`/`mirantis-services` skills, portable `omp config set` tuning incl. `modelRoles`, the `pass` vault; opt-in mnemopi memory + auto thinking via `manager.sh tune`) **and** per-session lifecycle (create with seeded `.omp/` + injected creds, attach/list/kill, share collab link). |
+| **Administrator** | `administrator.sh` | GCP/VM lifecycle: provision, start/stop, bootstrap (OS packages + mise/bun/omp/gh), ssh, destroy. |
+| **Manager** | `manager.sh` | VM-wide omp platform config (global `secrets.enabled`, global `RULES.md`/`AGENTS.md` + behaviour/safety `rules/` + the `commit-push-pr` command + `secrets.yml` + the `credential-access`/`mirantis-services`/`github` skills, portable `omp config set` tuning incl. `modelRoles`, the `pass` vault; opt-in mnemopi memory + auto thinking via `manager.sh tune`) **and** per-session lifecycle (create with seeded `.omp/` + injected creds, attach/list/kill, share collab link). |
 | **Operator / joiner** | *(no script)* | Interacts only by `omp join`-ing the shared session. Behaviour is governed by the global `RULES.md`/`AGENTS.md` and skills the manager installs. |
 
 ---

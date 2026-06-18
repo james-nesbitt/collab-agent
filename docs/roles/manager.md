@@ -99,20 +99,23 @@ first line must be `key: value` with a space after the colon; otherwise the whol
 line is taken as a single value — the back-compat behaviour.)
 
 **Per-operator identities in one session.** Give each operator a subtree under `people/`
-with two entries — `operator` (`name:`/`email:`, their service-independent identity) and
-`atlassian` (`email:`/`token:`, their JIRA+Confluence credential):
+with their entries — `operator` (`name:`/`email:`, their service-independent identity),
+`atlassian` (`email:`/`token:`, their JIRA+Confluence credential), and optionally `github`
+(`token:`, their GitHub PAT):
 
 ```bash
 printf 'name: Alice Example\nemail: alice@mirantis.com\n'      | ./manager.sh vault-add people/alice/operator
 printf 'email: alice@mirantis.com\ntoken: <alice-api-token>\n' | ./manager.sh vault-add people/alice/atlassian
+printf 'token: <alice-github-pat>\n'                           | ./manager.sh vault-add people/alice/github
 ```
 
 The `token` line auto-obfuscates (name ends in `token`); names and emails are not secret.
 Injecting the parent `people` subtree namespaces every operator's vars by their directory
 name (`ALICE_ATLASSIAN_TOKEN`, `ALICE_OPERATOR_NAME`, `BOB_…`); injecting one operator's
-subtree (`people/alice`) yields the bare `ATLASSIAN_*`/`OPERATOR_*`. The `mirantis-services`
-skill builds an operator roster from the `*_OPERATOR_NAME` vars and acts under the operator
-named in the prompt, asking if it is ambiguous.
+subtree (`people/alice`) yields the bare `ATLASSIAN_*`/`OPERATOR_*`/`GITHUB_TOKEN`. The
+`mirantis-services` (JIRA/Confluence) and `github` skills each build an operator roster from
+the `*_OPERATOR_NAME` vars and act under the operator named in the prompt, asking if it is
+ambiguous.
 
 ## 3. Launch a session
 

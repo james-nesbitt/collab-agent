@@ -224,6 +224,7 @@ ROLES
     echo "  ~/.omp/agent/commands/commit-push-pr.md"
     echo "  ~/.omp/agent/skills/credential-access/SKILL.md"
     echo "  ~/.omp/agent/skills/mirantis-services/SKILL.md"
+    echo "  ~/.omp/agent/skills/github/SKILL.md"
 }
 
 # Apply opt-in local-model tuning (no Ollama; both models are local ONNX, CPU,
