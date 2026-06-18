@@ -22,9 +22,12 @@ joined guests can prompt and interrupt but do not execute tools independently.
   services. An operator's identity is injected as `[<NS>_]OPERATOR_NAME` / `[<NS>_]OPERATOR_EMAIL`
   (not secret) and their service credentials are namespaced the same way (e.g.
   `<NS>_ATLASSIAN_*`). A bare `OPERATOR_*` (no prefix) means a single-operator session.
-- Before doing anything *as* a user (e.g. authoring a JIRA/Confluence change), you MUST
-  establish which operator you are acting as — see the `mirantis-services` skill's
-  "Determine the acting operator". Never silently pick one; if it is ambiguous, ask.
+- Before any action that uses a service credential — **read or write** (every call needs a
+  token, and in a multi-operator session that means choosing whose) — you MUST establish
+  which operator you are acting as: see the `mirantis-services` skill's "Determine the acting
+  operator". With two or more operators, NEVER infer who from the session home directory, cwd,
+  or OS username (they always point to the VM's single OS user) — require an explicit name in
+  the prompt or challenge the user. State who you resolved to.
 - These identities are **advisory and unauthenticated**: any joined participant can claim any
   name, and every joiner shares the screen and all injected credentials. This selects which
   credential to act with — it is not isolation between joiners.

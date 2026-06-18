@@ -43,10 +43,12 @@ entries above and start a new session so the vars are injected.
 
 ## Determine the acting operator
 
-Do this **before any write** (comment, issue/page create or update, transition). This session
-may carry several operators' identities at once, and collab does not tell you which joined
-user sent a prompt (oh-my-pi#2975), so you MUST establish the actor explicitly — never guess,
-never default silently.
+Do this **before any JIRA/Confluence call — read or write**: every call needs an Atlassian
+token, and in a multi-operator session that means choosing *whose*. This session may carry
+several operators' identities at once, and collab does not tell you which joined user sent a
+prompt (oh-my-pi#2975), so you MUST establish the actor explicitly — never guess, never
+default silently. State the operator you resolved to (e.g. "Acting as James Nesbitt") before
+the first call so the choice is visible.
 
 1. **Build the roster (names only — never tokens).** Operator names and emails are not secret
    and may be shown; tokens never.
@@ -59,13 +61,21 @@ never default silently.
    `<NS>_ATLASSIAN_EMAIL` / `<NS>_ATLASSIAN_TOKEN`). A bare `OPERATOR_NAME` (no prefix) means
    a single-operator session (creds = bare `ATLASSIAN_EMAIL` / `ATLASSIAN_TOKEN`).
 
-2. **Choose the actor.**
-   - Exactly one operator in the roster → use it.
-   - The prompt names one ("as alice, comment…", "comment as Bob") matching a roster entry →
-     use that one.
-   - Otherwise (several operators, no clear cue) → **STOP and challenge**: *"I can act as:
-     Alice (alice@…), Bob (bob@…). Who should I act as?"* and wait for the answer.
-   - If the harness later supplies the prompting user's identity directly, prefer it over
+2. **Choose the actor.** The actor may come ONLY from: an explicit operator named in the
+   prompt, a harness-supplied prompting-user identity, or the user's answer to a challenge.
+   - **NEVER infer the operator from ambient signals** — not the Linux/OS username, not
+     `$HOME`, not the session directory or cwd (e.g. `/home/jnesbitt_…/sessions/…`), not git
+     config, not any environment artifact. The session home always belongs to the VM's single
+     OS user and tells you NOTHING about which operator is prompting. Treating it as a cue is
+     the exact unauthenticated guess this step exists to prevent.
+   - Exactly one operator in the roster → use it (the only case with no ambiguity).
+   - The prompt explicitly names one ("as alice, comment…", "comment as Bob") matching a
+     roster entry → use that one.
+   - Two or more operators and the prompt does not explicitly name one → **STOP and
+     challenge**, even if the environment seems to "suggest" someone: *"This session carries
+     several identities — I can act as: Alice (alice@…), James Nesbitt (jnesbitt@…). Who should
+     I act as?"* Wait for the answer; make no JIRA/Confluence call until you have it.
+   - If the harness supplies the prompting user's identity directly, use it instead of
      challenging.
 
 3. **Bind the chosen operator's credential variable NAMES (not values).** Let `NS` be the
