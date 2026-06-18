@@ -26,6 +26,7 @@ The tooling is organized around three roles. Two have a script; the third does n
 
 # Manager — configure the platform, store a credential, launch a session
 ./manager.sh setup
+./manager.sh tune                 # opt-in: mnemopi memory + auto thinking
 printf '%s' "$MY_TOKEN" | ./manager.sh vault-add services/github/token
 ./manager.sh new work
 ./manager.sh collab work          # prints:  omp join "<link>"
@@ -58,14 +59,18 @@ platform/                     # global assets installed by `manager.sh setup`
   RULES.md                    #   always-apply rules (never print secrets)
   AGENTS.md                   #   machine context for every session
   secrets.yml                 #   secret-shape regex backstops
+  rules/                      #   five behaviour/safety rule files
+  commands/                   #   slash commands (commit-push-pr)
   skills/credential-access/   #   on-demand credential-access skill
+  skills/mirantis-services/   #   JIRA + Confluence via injected env vars
 session-template/.omp/        # per-folder config seeded into each new session
 docs/
   architecture.md             # system design (topology, trust, lifecycle)
   roles/{administrator,manager,operator}.md
   planning/                   # research + design history
     credential-isolation.md   #   credential design + Tier-2 roadmap
-    collab-analysis.md         #   collab mechanism analysis
+    collab-analysis.md        #   collab mechanism analysis
+    local-model-acceleration.md  #   deferred GPU / heavier local-model TODO
 ```
 
 ## Documentation

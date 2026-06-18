@@ -34,16 +34,10 @@ output, a file, or an intermediate variable you print:
 curl -fsS -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user
 ```
 
-## The model never sees the real value
+## Never reveal a value
 
-Global `secrets.enabled` obfuscation replaces secret values with `#XXXX#` placeholders
-before anything reaches the model. That protects the model — it does **not** protect
-the transcript or guests:
-
-- **Never print, echo, `cat`, or log a value.** A tool result containing the real value
-  is persisted de-obfuscated into the session transcript on disk.
-- **Assume every joined guest sees anything printed.** Guests are inside the credential
-  trust boundary and see the de-obfuscated screen.
-
-If you need to confirm a credential works, exercise it against its service (as above)
-and inspect the service's response — never the value itself.
+Printing a credential is forbidden — see the always-apply `credential-safety` rule and the
+collab-host `RULES.md`: the model only sees `#XXXX#`, but a printed value persists
+de-obfuscated to the on-disk transcript and shows on every guest's screen. To confirm a
+credential works, exercise it against its service (as above) and inspect the service's
+response — never the value itself.

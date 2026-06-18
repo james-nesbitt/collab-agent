@@ -7,13 +7,19 @@
 #
 # Platform config (global, idempotent):
 #   setup [--passphrase]     Enable secret obfuscation, ensure the credential
-#                            vault, and install global skills/RULES.md/AGENTS.md.
+#                            vault, and install global rules, commands, skills,
+#                            secret patterns, and portable tuning (incl. modelRoles).
 #                            --passphrase: protect the vault key with a passphrase
 #                            (prompted; injected at session start, never stored).
 #   vault-add ENTRY          Insert a vault entry (value read from stdin, never
 #                            echoed), e.g.  printf '%s' "$TOK" | ./manager.sh \
 #                            vault-add services/github/token
 #   vault-ls [SUBTREE]       List vault entry NAMES only (no values).
+#   tune [--memory] [--thinking]
+#                            Apply opt-in local-model tuning: mnemopi long-term
+#                            memory (--memory) and/or automatic thinking-level
+#                            selection (--thinking). Local ONNX models, no Ollama.
+#                            No flag applies both.
 #
 # Session lifecycle:
 #   new NAME [--subtree SUB] Create a detached tmux session running omp, with a
@@ -168,18 +174,86 @@ VAULT
 
     # 3. Global platform assets.
     info "Installing global platform assets to ~/.omp/agent/…"
-    remote "mkdir -p ~/.omp/agent/skills/credential-access"
-    upload "${SCRIPT_DIR}/platform/AGENTS.md"                        '~/.omp/agent/AGENTS.md'
-    upload "${SCRIPT_DIR}/platform/RULES.md"                         '~/.omp/agent/RULES.md'
-    upload "${SCRIPT_DIR}/platform/secrets.yml"                      '~/.omp/agent/secrets.yml'
-    upload "${SCRIPT_DIR}/platform/skills/credential-access/SKILL.md" '~/.omp/agent/skills/credential-access/SKILL.md'
+    remote "mkdir -p ~/.omp/agent/rules ~/.omp/agent/commands"
+    upload "${SCRIPT_DIR}/platform/AGENTS.md"   '~/.omp/agent/AGENTS.md'
+    upload "${SCRIPT_DIR}/platform/RULES.md"    '~/.omp/agent/RULES.md'
+    upload "${SCRIPT_DIR}/platform/secrets.yml" '~/.omp/agent/secrets.yml'
+
+    # Behaviour/safety rule files.
+    local f
+    for f in "${SCRIPT_DIR}"/platform/rules/*.md; do
+        upload "${f}" "~/.omp/agent/rules/$(basename "${f}")"
+    done
+    # Slash commands.
+    upload "${SCRIPT_DIR}/platform/commands/commit-push-pr.md" '~/.omp/agent/commands/commit-push-pr.md'
+    # Skills (one directory per skill under platform/skills/).
+    local d name
+    for d in "${SCRIPT_DIR}"/platform/skills/*/; do
+        name="$(basename "${d}")"
+        remote "mkdir -p ~/.omp/agent/skills/${name}"
+        upload "${d}SKILL.md" "~/.omp/agent/skills/${name}/SKILL.md"
+    done
+
+    # 4. Portable agent tuning. Best-effort: ';'-chained (not '&&') so an unknown
+    # key on a future omp version does not abort the rest of the batch.
+    info "Applying portable agent tuning (omp config set)…"
+    remote "bash -lc 'omp config set todo.eager always; omp config set search.contextBefore 1; omp config set search.contextAfter 1; omp config set readLineNumbers true; omp config set lsp.diagnosticsOnEdit true; omp config set steeringMode all; omp config set checkpoint.enabled true; omp config set async.enabled true; omp config set inspect_image.enabled true; omp config set task.isolation.mode rcopy; omp config set task.isolation.merge patch; omp config set task.isolation.commits ai; omp config set task.maxConcurrency 8; omp config set task.eager default; omp config set mcp.discoveryMode true; omp config set symbolPreset nerd; omp config set hideThinkingBlock false; omp config set providers.tinyModel lfm2-350m'" </dev/null \
+        || warn "some omp config set keys were rejected (best-effort tuning)"
+
+    # modelRoles is a JSON-record setting (the dotted 'modelRoles.<role>' form is not a
+    # valid key), so set it as one record. Sent over a stdin login shell to keep the JSON's
+    # double quotes out of the remote command string. Anthropic models the VM is already
+    # authenticated for; no Ollama.
+    info "Pinning model roles (Anthropic; VM is already authenticated)…"
+    gssh -- 'bash -ls' <<'ROLES' | grep -q ROLES_OK || warn "modelRoles not set (best-effort)"
+omp config set modelRoles '{"default":"anthropic/claude-sonnet-4-6","plan":"anthropic/claude-opus-4-8","slow":"anthropic/claude-haiku-4-5","smol":"anthropic/claude-haiku-4-5"}' >/dev/null 2>&1 && echo ROLES_OK
+ROLES
+    ok "Tuning applied (incl. modelRoles)"
 
     echo ""
     echo "SETUP_OK"
     echo "  ~/.omp/agent/AGENTS.md"
     echo "  ~/.omp/agent/RULES.md"
     echo "  ~/.omp/agent/secrets.yml"
+    echo "  ~/.omp/agent/rules/  (5 behaviour/safety rules)"
+    echo "  ~/.omp/agent/commands/commit-push-pr.md"
     echo "  ~/.omp/agent/skills/credential-access/SKILL.md"
+    echo "  ~/.omp/agent/skills/mirantis-services/SKILL.md"
+}
+
+# Apply opt-in local-model tuning (no Ollama; both models are local ONNX, CPU,
+# auto-downloaded from HF on first use). No flags applies both.
+cmd_tune() {
+    local do_memory=false do_thinking=false
+    if [[ $# -eq 0 ]]; then
+        do_memory=true; do_thinking=true
+    fi
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --memory)   do_memory=true; shift ;;
+            --thinking) do_thinking=true; shift ;;
+            *) die "Unknown tune option: $1 (use --memory and/or --thinking)" ;;
+        esac
+    done
+
+    require_running
+
+    if [[ "${do_memory}" == true ]]; then
+        info "Enabling mnemopi long-term memory (local ONNX model; no Ollama)…"
+        remote "bash -lc 'omp config set memory.backend mnemopi; omp config set mnemopi.scoping per-project-tagged; omp config set mnemopi.noEmbeddings true; omp config set mnemopi.llmMode smol; omp config set providers.memoryModel qwen3-1.7b; omp config set memories.minRolloutIdleHours 6; omp config set memories.maxRolloutAgeDays 30; omp config set memories.summaryInjectionTokenLimit 5000'" </dev/null \
+            || warn "some memory config keys were rejected (best-effort)"
+        ok "memory.backend=mnemopi (providers.memoryModel=qwen3-1.7b)"
+    fi
+
+    if [[ "${do_thinking}" == true ]]; then
+        info "Enabling automatic thinking-level selection (local ONNX model; no Ollama)…"
+        remote "bash -lc 'omp config set defaultThinkingLevel auto; omp config set providers.autoThinkingModel qwen3-1.7b'" </dev/null \
+            || warn "some thinking config keys were rejected (best-effort)"
+        ok "defaultThinkingLevel=auto (providers.autoThinkingModel=qwen3-1.7b)"
+    fi
+
+    echo ""
+    echo "TUNE_OK"
 }
 
 cmd_vault_add() {
@@ -349,6 +423,7 @@ shift 2>/dev/null || true
 
 case "${SUBCOMMAND}" in
     setup)          cmd_setup "$@" ;;
+    tune)           cmd_tune "$@" ;;
     vault-add)      cmd_vault_add "$@" ;;
     vault-ls)       cmd_vault_ls "$@" ;;
     new)            cmd_new "$@" ;;

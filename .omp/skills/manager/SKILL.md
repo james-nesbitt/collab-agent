@@ -1,6 +1,6 @@
 ---
 name: manager
-description: Act as the manager for the omp-agent VM from this repo — configure the omp platform (enable secret obfuscation, the pass credential vault, global skills/RULES.md/AGENTS.md) and run sessions (create with injected credentials, attach, list, kill, share a collab join link) — by driving manager.sh. Use when the user asks to set up omp, add/list a credential or secret, start/share/attach/kill a session, or get a collab link. For VM provisioning/start/stop use the `administrator` skill.
+description: Act as the manager for the omp-agent VM from this repo — configure the omp platform (secret obfuscation, the pass credential vault, global rules/commands/skills/secret-patterns, portable tuning incl. modelRoles, and opt-in mnemopi memory + auto thinking via `tune`) and run sessions (create with injected credentials, attach, list, kill, share a collab join link) — by driving manager.sh. Use when the user asks to set up or tune omp, add/list a credential or secret, start/share/attach/kill a session, or get a collab link. For VM provisioning/start/stop use the `administrator` skill.
 ---
 
 # Manager
@@ -21,14 +21,20 @@ Full reference: read `docs/roles/manager.md`. Credential design and the trust bo
 | Configure with a passphrase-protected vault | `./manager.sh setup --passphrase` (prompts; `new` then prompts + presets at launch) |
 | Store a credential (value on **stdin**) | `printf '%s' "$VAL" \| ./manager.sh vault-add services/github/token` |
 | List vault entry NAMES (never values) | `./manager.sh vault-ls [SUBTREE]` |
+| Tune local-model features (mnemopi memory, auto thinking) | `./manager.sh tune [--memory] [--thinking]` (no flag = both) |
 | Launch a session (creds injected) | `./manager.sh new NAME [--subtree SUB]` |
 | Share + print join link | `./manager.sh collab NAME [view]` |
 | Attach / list / kill | `./manager.sh attach [NAME]` · `./manager.sh list` · `./manager.sh kill NAME` |
 
 ## Workflows
 
-- **First-time platform setup:** `./manager.sh setup` → expect `SETUP_OK` and four
-  installed `~/.omp/agent/` paths. Re-run after editing anything under `platform/`.
+- **First-time platform setup:** `./manager.sh setup` → expect `SETUP_OK` and the
+  installed `~/.omp/agent/` paths (context, rules, `commit-push-pr` command, skills,
+  secret patterns) plus the applied `omp config set` tuning. Re-run after editing
+  anything under `platform/`.
+- **Enable local-model features (opt-in):** `./manager.sh tune --memory` (mnemopi
+  long-term memory) and/or `--thinking` (auto thinking-level); no flag applies both.
+  Local ONNX models, no Ollama, no extra credentials; expect `TUNE_OK`.
 - **Add a credential:** pipe the value in on stdin — never pass it as an argument.
   The entry path becomes an env-var name (`/` and `-` → `_`, uppercased), so
   `services/github/token` → `GITHUB_TOKEN`. End entries with a secret keyword
