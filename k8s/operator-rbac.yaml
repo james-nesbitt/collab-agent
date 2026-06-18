@@ -26,9 +26,9 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["create", "delete", "get", "list", "watch"]
-  # Within session namespaces
+  # Within session namespaces (secrets managed exclusively by ESO — no operator access)
   - apiGroups: [""]
-    resources: ["pods", "pods/exec", "persistentvolumeclaims", "secrets", "configmaps", "serviceaccounts"]
+    resources: ["pods", "pods/exec", "persistentvolumeclaims", "configmaps", "serviceaccounts"]
     verbs: ["create", "get", "list", "watch", "delete", "update", "patch"]
   # NetworkPolicy
   - apiGroups: ["networking.k8s.io"]

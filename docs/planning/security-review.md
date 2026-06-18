@@ -16,8 +16,8 @@ before this architecture was written. No GPG vault remains.
 | ID  | Severity | Title                                              | Status    |
 |-----|----------|----------------------------------------------------|-----------|
 | F01 | High     | curl\|sh mise install — unverified code execution  | Open      |
-| F02 | High     | Operator ClusterRole grants secrets CRUD to all ns | Open      |
-| F03 | High     | ESO SA has project-wide secretAccessor (all GSM)   | Open      |
+| F02 | High     | Operator ClusterRole grants secrets CRUD to all ns | **Fixed** |
+| F03 | High     | ESO SA has project-wide secretAccessor (all GSM)   | **Fixed** |
 | F04 | Medium   | Helm ESO chart installed without `--version` pin   | Open      |
 | F05 | Medium   | OCI image tags default to `latest` (no digest)     | Open      |
 | F06 | Medium   | Collab join link stored in plain-text CR status    | Open      |

@@ -207,12 +207,9 @@ cmd_provision() {
         ok "SA omp-operator created."
     fi
 
-    # 4. IAM roles
+    # 4. IAM roles — operator gets project-level viewer (metadata only);
+    #    ESO gets per-secret secretAccessor granted by vault-add (not project-wide).
     info "Binding IAM roles…"
-    gcloud projects add-iam-policy-binding "${GCP_PROJECT}" \
-        --member="serviceAccount:${SA_ESO}" \
-        --role="roles/secretmanager.secretAccessor" \
-        --quiet
     gcloud projects add-iam-policy-binding "${GCP_PROJECT}" \
         --member="serviceAccount:${SA_OPERATOR}" \
         --role="roles/secretmanager.viewer" \
@@ -501,6 +498,14 @@ cmd_vault_add() {
             --project="${GCP_PROJECT}" \
             --data-file=- \
             --quiet
+
+    # Grant ESO SA secretAccessor on this specific secret only (not project-wide).
+    info "Granting ESO secretAccessor on '${gsm_id}'…"
+    gcloud secrets add-iam-policy-binding "${gsm_id}" \
+        --project="${GCP_PROJECT}" \
+        --member="serviceAccount:${SA_ESO}" \
+        --role="roles/secretmanager.secretAccessor" \
+        --quiet
 
     ok "ADDED ${entry}"
 }
