@@ -1,17 +1,16 @@
 # Shared Sessions on the Remote Agent Machine
 
-Analysis of oh-my-pi collab / RPC for sharing the GCP omp-agent VM across users
+Analysis of oh-my-pi collab for sharing the GCP omp-agent VM across users
 and machines.
 
-Sources: <https://omp.sh/docs/collab>, `omp://rpc.md`, `omp join --help`.
+Sources: <https://omp.sh/docs/collab>, `omp join --help`.
 
 ## TL;DR
 
 `/collab` is the right mechanism for shared sessions across users/machines.
 The GCP VM is the ideal **host**: it runs the agent, the repo, the toolchain,
 and docker/podman; guests attach to the live session from any machine (native
-TUI) or a browser (no install). `--mode rpc` is a separate, single-machine
-programmatic-control layer — not the cross-machine sharing path.
+TUI) or a browser (no install).
 
 ## How `/collab` works
 
@@ -145,39 +144,11 @@ relay; the key stays in the fragment.
 | `collab.relayUrl` | `wss://my.omp.sh` | Relay used by `/collab` when no relay is passed inline |
 | `collab.displayName` | OS username | Name shown to other participants |
 
-## `--mode rpc` — a different layer
-
-`omp --mode rpc` runs the agent as a newline-delimited JSON protocol over stdio
-(stdin = commands, stdout = ready frame + responses + session/agent events).
-It is for **programmatic, single-machine control** — an IDE, automation, or a
-custom front-end driving omp — not for cross-machine human sharing.
-
-- Startup: `omp --mode rpc [regular CLI options]`; writes `{ "type": "ready" }`,
-  then processes JSONL commands; exits 0 when stdin closes.
-- `@file` CLI args are rejected in RPC mode.
-- Commands cover prompting (`prompt`, `steer`, `follow_up`, `abort`), state
-  (`get_state`, `set_todos`), model (`set_model`, `cycle_model`), bash,
-  sessions, login, and host-owned tools / URI schemes (callbacks over the same
-  transport).
-- `prompt` is acked on acceptance, not completion; turns finish via `agent_end`.
-
-### When to use which
-
-| | `/collab` + `/join` | `--mode rpc` |
-| --- | --- | --- |
-| What | Share one live session, human↔human | Drive omp programmatically over JSONL stdio |
-| Who joins | People (TUI or browser) | A host program / IDE / automation |
-| Transport | E2E-encrypted via relay | stdin/stdout, same machine |
-| Use for | Pair-programming / watching the remote agent across machines | Building a custom front-end or wiring omp into tooling |
-
-For "shared sessions across users/machines," use **`/collab`**. `--mode rpc`
-only becomes relevant if you later build a custom UI that itself relays.
-
 ## Recommended setup for this VM
 
-1. Host the session on the VM (already running under tmux via `./session.sh`).
-2. Inside the omp TUI on the VM: `/collab` (full) or `/collab view` (read-only).
-3. Share the printed `omp join "<link>"` or `my.omp.sh/#<link>` URL.
+1. Launch the session on the VM: `./manager.sh new work` (runs omp under tmux).
+2. Share it from the laptop: `./manager.sh collab work` (or `./manager.sh collab work view` for read-only) prints the `omp join "<link>"` line.
+3. Hand the printed `omp join "<link>"` or `my.omp.sh/#<link>` URL to operators; attach yourself with `./manager.sh attach work`.
 4. Benefits that fit the original goal:
    - Agent, repo, toolchain, docker/podman all live on the always-on VM.
    - The session survives your laptop sleeping; collab lets others attach to the
@@ -191,10 +162,10 @@ ciphertext, room ids, connection counts; the key never leaves the URL
 fragment). Acceptable to start with. To avoid the dependency entirely,
 `/collab <relay>` accepts a custom relay — the same VM could host one.
 
-## Possible follow-up (not yet built)
+## Implemented: laptop-side collab helper
 
-A `session.sh collab [view]` helper that SSHes in and surfaces the join link
-from the laptop. Cleanest implementation runs the VM's omp under `--mode rpc`
-in tmux and sends `/collab` as a prompt frame; simplest is to document running
-`/collab` manually inside the attached TUI. Recommend documenting the manual
-path first; only build the RPC wrapper if laptop-side automation is wanted.
+`./manager.sh collab [NAME] [view]` SSHes into the VM, sends `/collab` (or
+`/collab view`) into the session's tmux pane, and prints the captured
+`omp join "<link>"`. Driving the interactive TUI under tmux was sufficient;
+the manual fallback is to attach (`./manager.sh attach`) and type
+`/collab` by hand.

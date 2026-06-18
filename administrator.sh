@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# manage.sh — Lifecycle management for the omp-agent GCP instance.
+# administrator.sh — administrator role: lifecycle of the omp-agent GCP instance.
 #
 # Usage:
-#   ./manage.sh <subcommand> [args...]
+#   ./administrator.sh <subcommand> [args...]
 #
 # Subcommands:
 #   provision                Create the VM and reserve a static IP (run once)
@@ -16,7 +16,7 @@
 #   destroy                  Tear down instance and static IP
 #   help                     Show this help
 #
-# For tmux session management on the VM, see ./session.sh.
+# For omp platform config + tmux session management, see ./manager.sh.
 #
 # Configuration (override via environment):
 #   INSTANCE_NAME    (default: omp-agent)
@@ -31,69 +31,23 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Shared config + helpers
 # ---------------------------------------------------------------------------
-GCP_PROJECT="tools-348616"
-INSTANCE_NAME="${INSTANCE_NAME:-omp-agent}"
-ZONE="${ZONE:-europe-west1-b}"
-REGION="${REGION:-europe-west1}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_TAG="admin"
+[[ -f "${SCRIPT_DIR}/lib/common.sh" ]] || { echo "[admin] ERROR: lib/common.sh not found" >&2; exit 1; }
+. "${SCRIPT_DIR}/lib/common.sh"
+
+# ---------------------------------------------------------------------------
+# Administrator-only configuration (provisioning)
+# ---------------------------------------------------------------------------
 MACHINE_TYPE="${MACHINE_TYPE:-e2-standard-4}"
 DISK_SIZE="${DISK_SIZE:-200GB}"
 DISK_TYPE="${DISK_TYPE:-pd-balanced}"
 STATIC_IP_NAME="${STATIC_IP_NAME:-omp-server-ip}"
 FIREWALL_RULE="${FIREWALL_RULE:-allow-omp-server}"
-USE_IAP="${USE_IAP:-true}"
 IMAGE_FAMILY="ubuntu-2404-lts-amd64"
 IMAGE_PROJECT="ubuntu-os-cloud"
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-info() { echo "[manage] $*"; }
-warn() { echo "[manage] WARN: $*"; }
-ok()   { echo "[manage] OK: $*"; }
-die()  { echo "[manage] ERROR: $*" >&2; exit 1; }
-
-iap_flag()   { [[ "${USE_IAP}" == "true" ]] && echo "--tunnel-through-iap" || echo ""; }
-
-gssh() {
-    # gssh -- <remote-cmd>  or  gssh (interactive)
-    gcloud compute ssh "${INSTANCE_NAME}" \
-        --project="${GCP_PROJECT}" \
-        --zone="${ZONE}" \
-        $(iap_flag) \
-        "$@"
-}
-
-resource_exists() {
-    # resource_exists <gcloud subcommand> <name> [extra flags...]
-    local subcmd=$1; shift
-    local name=$1; shift
-    gcloud ${subcmd} describe "${name}" "$@" --project="${GCP_PROJECT}" \
-        --format="value(name)" 2>/dev/null | grep -q .
-}
-
-get_static_ip() {
-    gcloud compute addresses describe "${STATIC_IP_NAME}" \
-        --project="${GCP_PROJECT}" \
-        --region="${REGION}" \
-        --format="value(address)" 2>/dev/null || true
-}
-
-instance_status() {
-    gcloud compute instances describe "${INSTANCE_NAME}" \
-        --project="${GCP_PROJECT}" \
-        --zone="${ZONE}" \
-        --format="value(status)" 2>/dev/null || echo "NOT_FOUND"
-}
-
-require_running() {
-    local status
-    status=$(instance_status)
-    [[ "${status}" == "RUNNING" ]] || die "Instance is not running (status: ${status}). Run: ./manage.sh start"
-}
 
 # ---------------------------------------------------------------------------
 # Subcommands
@@ -152,8 +106,9 @@ cmd_provision() {
     echo "  Static IP : ${static_ip}"
     echo ""
     echo "  Next steps:"
-    echo "    ./manage.sh bootstrap"
-    echo "    ./session.sh new work"
+    echo "    ./administrator.sh bootstrap"
+    echo "    ./manager.sh setup"
+    echo "    ./manager.sh new work"
     echo "============================================================"
 }
 
@@ -265,7 +220,7 @@ tmux -V
 ~/.local/bin/mise exec bun -- bun --version
 PATH="$HOME/.bun/bin:$PATH" ~/.local/bin/mise exec bun -- omp --version
 BOOTSTRAP
-    info "Bootstrap complete. Run: ./session.sh new work"
+    info "Bootstrap complete. Run: ./manager.sh setup, then ./manager.sh new work"
 }
 
 cmd_status() {
@@ -280,7 +235,7 @@ cmd_status() {
 
     if [[ "${status}" == "RUNNING" ]]; then
         echo ""
-        echo "Manage tmux sessions with: ./session.sh"
+        echo "Configure omp + manage tmux sessions with: ./manager.sh"
     fi
 }
 
@@ -357,7 +312,7 @@ case "${SUBCOMMAND}" in
     help|--help|-h) cmd_help ;;
     *)
         echo "Unknown subcommand: ${SUBCOMMAND}" >&2
-        echo "Run './manage.sh help' for usage." >&2
+        echo "Run './administrator.sh help' for usage." >&2
         exit 1
         ;;
 esac
