@@ -6,12 +6,20 @@
 #   ./manager.sh <subcommand> [args...]
 #
 # Platform config (global, idempotent):
-#   setup                    Enable secret obfuscation, ensure the credential
-#                            vault, and install global skills/RULES.md/AGENTS.md.
+#   setup [--passphrase]     Enable secret obfuscation, ensure the credential
+#                            vault, and install global rules, commands, skills,
+#                            secret patterns, and portable tuning (incl. modelRoles).
+#                            --passphrase: protect the vault key with a passphrase
+#                            (prompted; injected at session start, never stored).
 #   vault-add ENTRY          Insert a vault entry (value read from stdin, never
 #                            echoed), e.g.  printf '%s' "$TOK" | ./manager.sh \
 #                            vault-add services/github/token
 #   vault-ls [SUBTREE]       List vault entry NAMES only (no values).
+#   tune [--memory] [--thinking]
+#                            Apply opt-in local-model tuning: mnemopi long-term
+#                            memory (--memory) and/or automatic thinking-level
+#                            selection (--thinking). Local ONNX models, no Ollama.
+#                            No flag applies both.
 #
 # Session lifecycle:
 #   new NAME [--subtree SUB] Create a detached tmux session running omp, with a
@@ -78,30 +86,71 @@ valid_token() { [[ "$1" =~ ^[A-Za-z0-9_/-]+$ ]]; }
 # interpolate into remote tmux -t targets, filesystem paths, and the sed delimiter).
 valid_name() { [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]]; }
 
+# Create/ensure a passphrase-protected vault on the VM. Takes the passphrase as $1
+# (read by the caller before any SSH call), uploads the VM-side helpers, and runs
+# keygen with the passphrase streamed over SSH on stdin (never argv, never disk).
+setup_vault_passphrase() {
+    local pp="$1"
+    info "Ensuring passphrase-protected credential vault at \$HOME/.omp-vault…"
+    remote "bash -lc 'mkdir -p ~/.omp-vault; command -v pass >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq pass; command -v gpg >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gnupg'" </dev/null >/dev/null
+    upload "${SCRIPT_DIR}/platform/vault/init-vault.sh" '~/.omp-vault/init-vault.sh'
+    upload "${SCRIPT_DIR}/platform/vault/preset.sh"     '~/.omp-vault/preset.sh'
+    local out
+    out=$(printf '%s\n' "${pp}" | gssh -- 'bash -lc "bash $HOME/.omp-vault/init-vault.sh"' 2>&1) \
+        || die "vault init failed: ${out}"
+    case "${out}" in
+        *VAULT_OK*)     ok "Passphrase-protected vault created" ;;
+        *VAULT_EXISTS*) warn "Vault already exists at ~/.omp-vault — left unchanged (passphrase not applied). Remove it on the VM to recreate." ;;
+        *)              die "vault init: unexpected output: ${out}" ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
 # Platform config subcommands
 # ---------------------------------------------------------------------------
 cmd_setup() {
+    local passphrase_mode=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --passphrase) passphrase_mode=true; shift ;;
+            *) die "Unknown setup option: $1 (use --passphrase)" ;;
+        esac
+    done
+
+    # Read the passphrase up front, before any SSH call can consume stdin.
+    local pp=""
+    if [[ "${passphrase_mode}" == true ]]; then
+        local pp2
+        read -rsp "New vault passphrase: " pp; echo >&2
+        read -rsp "Confirm passphrase:   " pp2; echo >&2
+        [[ -n "${pp}" ]] || die "Empty passphrase."
+        [[ "${pp}" == "${pp2}" ]] || die "Passphrases do not match."
+    fi
+
     require_running
 
     # 1. Global secret obfuscation.
     info "Enabling omp secret obfuscation (global)…"
     local got
-    got=$(remote "bash -lc 'omp config set secrets.enabled true >/dev/null 2>&1; omp config get secrets.enabled'" | tr -d '[:space:]')
+    got=$(remote "bash -lc 'omp config set secrets.enabled true >/dev/null 2>&1; omp config get secrets.enabled'" </dev/null | tr -d '[:space:]')
     [[ "${got}" == "true" ]] || die "secrets.enabled is '${got}', expected 'true'"
     ok "secrets.enabled=true"
 
-    # 2. Credential vault (no-passphrase ed25519 — documented Tier-1 boundary:
-    #    any in-session participant can decrypt; Tier-2 OS isolation is the fix).
-    info "Ensuring credential vault at \$HOME/.omp-vault…"
-    gssh -- 'bash -s' <<'VAULT' | grep -q VAULT_OK || die "vault init failed"
+    # 2. Credential vault.
+    if [[ "${passphrase_mode}" == true ]]; then
+        setup_vault_passphrase "${pp}"
+    else
+        # No-passphrase ed25519 (Tier-1: any in-session participant can decrypt).
+        # For at-rest / other-local-user protection: ./manager.sh setup --passphrase
+        info "Ensuring credential vault at \$HOME/.omp-vault (no passphrase)…"
+        gssh -- 'bash -s' <<'VAULT' | grep -q VAULT_OK || die "vault init failed"
 set -e
 command -v pass >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq pass
 command -v gpg  >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gnupg
 VDIR="$HOME/.omp-vault"
 export GNUPGHOME="$VDIR/gnupg" PASSWORD_STORE_DIR="$VDIR/store"
 if [ ! -d "$PASSWORD_STORE_DIR" ]; then
-  mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"
+  mkdir -p "$GNUPGHOME"; chmod 700 "$VDIR" "$GNUPGHOME"
   cat > /tmp/omp-vault-keyparams <<'KP'
 %no-protection
 Key-Type: eddsa
@@ -120,22 +169,91 @@ KP
 fi
 echo VAULT_OK
 VAULT
-    ok "Vault ready"
+        ok "Vault ready"
+    fi
 
     # 3. Global platform assets.
     info "Installing global platform assets to ~/.omp/agent/…"
-    remote "mkdir -p ~/.omp/agent/skills/credential-access"
-    upload "${SCRIPT_DIR}/platform/AGENTS.md"                        '~/.omp/agent/AGENTS.md'
-    upload "${SCRIPT_DIR}/platform/RULES.md"                         '~/.omp/agent/RULES.md'
-    upload "${SCRIPT_DIR}/platform/secrets.yml"                      '~/.omp/agent/secrets.yml'
-    upload "${SCRIPT_DIR}/platform/skills/credential-access/SKILL.md" '~/.omp/agent/skills/credential-access/SKILL.md'
+    remote "mkdir -p ~/.omp/agent/rules ~/.omp/agent/commands"
+    upload "${SCRIPT_DIR}/platform/AGENTS.md"   '~/.omp/agent/AGENTS.md'
+    upload "${SCRIPT_DIR}/platform/RULES.md"    '~/.omp/agent/RULES.md'
+    upload "${SCRIPT_DIR}/platform/secrets.yml" '~/.omp/agent/secrets.yml'
+
+    # Behaviour/safety rule files.
+    local f
+    for f in "${SCRIPT_DIR}"/platform/rules/*.md; do
+        upload "${f}" "~/.omp/agent/rules/$(basename "${f}")"
+    done
+    # Slash commands.
+    upload "${SCRIPT_DIR}/platform/commands/commit-push-pr.md" '~/.omp/agent/commands/commit-push-pr.md'
+    # Skills (one directory per skill under platform/skills/).
+    local d name
+    for d in "${SCRIPT_DIR}"/platform/skills/*/; do
+        name="$(basename "${d}")"
+        remote "mkdir -p ~/.omp/agent/skills/${name}"
+        upload "${d}SKILL.md" "~/.omp/agent/skills/${name}/SKILL.md"
+    done
+
+    # 4. Portable agent tuning. Best-effort: ';'-chained (not '&&') so an unknown
+    # key on a future omp version does not abort the rest of the batch.
+    info "Applying portable agent tuning (omp config set)…"
+    remote "bash -lc 'omp config set todo.eager always; omp config set search.contextBefore 1; omp config set search.contextAfter 1; omp config set readLineNumbers true; omp config set lsp.diagnosticsOnEdit true; omp config set steeringMode all; omp config set checkpoint.enabled true; omp config set async.enabled true; omp config set inspect_image.enabled true; omp config set task.isolation.mode rcopy; omp config set task.isolation.merge patch; omp config set task.isolation.commits ai; omp config set task.maxConcurrency 8; omp config set task.eager default; omp config set mcp.discoveryMode true; omp config set symbolPreset nerd; omp config set hideThinkingBlock false; omp config set providers.tinyModel lfm2-350m'" </dev/null \
+        || warn "some omp config set keys were rejected (best-effort tuning)"
+
+    # modelRoles is a JSON-record setting (the dotted 'modelRoles.<role>' form is not a
+    # valid key), so set it as one record. Sent over a stdin login shell to keep the JSON's
+    # double quotes out of the remote command string. Anthropic models the VM is already
+    # authenticated for; no Ollama.
+    info "Pinning model roles (Anthropic; VM is already authenticated)…"
+    gssh -- 'bash -ls' <<'ROLES' | grep -q ROLES_OK || warn "modelRoles not set (best-effort)"
+omp config set modelRoles '{"default":"anthropic/claude-sonnet-4-6","plan":"anthropic/claude-opus-4-8","slow":"anthropic/claude-haiku-4-5","smol":"anthropic/claude-haiku-4-5"}' >/dev/null 2>&1 && echo ROLES_OK
+ROLES
+    ok "Tuning applied (incl. modelRoles)"
 
     echo ""
     echo "SETUP_OK"
     echo "  ~/.omp/agent/AGENTS.md"
     echo "  ~/.omp/agent/RULES.md"
     echo "  ~/.omp/agent/secrets.yml"
+    echo "  ~/.omp/agent/rules/  (5 behaviour/safety rules)"
+    echo "  ~/.omp/agent/commands/commit-push-pr.md"
     echo "  ~/.omp/agent/skills/credential-access/SKILL.md"
+    echo "  ~/.omp/agent/skills/mirantis-services/SKILL.md"
+}
+
+# Apply opt-in local-model tuning (no Ollama; both models are local ONNX, CPU,
+# auto-downloaded from HF on first use). No flags applies both.
+cmd_tune() {
+    local do_memory=false do_thinking=false
+    if [[ $# -eq 0 ]]; then
+        do_memory=true; do_thinking=true
+    fi
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --memory)   do_memory=true; shift ;;
+            --thinking) do_thinking=true; shift ;;
+            *) die "Unknown tune option: $1 (use --memory and/or --thinking)" ;;
+        esac
+    done
+
+    require_running
+
+    if [[ "${do_memory}" == true ]]; then
+        info "Enabling mnemopi long-term memory (local ONNX model; no Ollama)…"
+        remote "bash -lc 'omp config set memory.backend mnemopi; omp config set mnemopi.scoping per-project-tagged; omp config set mnemopi.noEmbeddings true; omp config set mnemopi.llmMode smol; omp config set providers.memoryModel qwen3-1.7b; omp config set memories.minRolloutIdleHours 6; omp config set memories.maxRolloutAgeDays 30; omp config set memories.summaryInjectionTokenLimit 5000'" </dev/null \
+            || warn "some memory config keys were rejected (best-effort)"
+        ok "memory.backend=mnemopi (providers.memoryModel=qwen3-1.7b)"
+    fi
+
+    if [[ "${do_thinking}" == true ]]; then
+        info "Enabling automatic thinking-level selection (local ONNX model; no Ollama)…"
+        remote "bash -lc 'omp config set defaultThinkingLevel auto; omp config set providers.autoThinkingModel qwen3-1.7b'" </dev/null \
+            || warn "some thinking config keys were rejected (best-effort)"
+        ok "defaultThinkingLevel=auto (providers.autoThinkingModel=qwen3-1.7b)"
+    fi
+
+    echo ""
+    echo "TUNE_OK"
 }
 
 cmd_vault_add() {
@@ -179,6 +297,15 @@ cmd_new() {
     valid_token "${subtree}" || die "Invalid subtree: ${subtree}"
     require_running
 
+    # Detect a passphrase-protected vault and read the passphrase up front, BEFORE
+    # any stdin-consuming SSH call (e.g. session_exists), so a forwarded SSH channel
+    # cannot swallow it. Read locally; never argv.
+    local vault_pp=""
+    if remote "test -f ~/.omp-vault/.passphrase-protected" </dev/null 2>/dev/null; then
+        read -rsp "Vault passphrase: " vault_pp; echo >&2
+        [[ -n "${vault_pp}" ]] || die "Empty passphrase; aborting."
+    fi
+
     if session_exists "${name}"; then
         die "Session '${name}' already exists. Use: ./manager.sh attach ${name}"
     fi
@@ -219,6 +346,18 @@ NEW
     upload "${SCRIPT_DIR}/session-template/.omp/config.yml" "~/sessions/${name}/.omp/config.yml"
     sed "s/__SESSION_NAME__/${name}/g" "${SCRIPT_DIR}/session-template/.omp/AGENTS.md" \
         | remote "cat > ~/sessions/${name}/.omp/AGENTS.md"
+
+    # Passphrase-protected vault: preset the passphrase into gpg-agent on the VM
+    # right before launch so the detached launcher's `pass show` calls decrypt
+    # without a pinentry prompt. Streamed over SSH on stdin; cached only in
+    # gpg-agent memory (bounded by max-cache-ttl).
+    if [[ -n "${vault_pp}" ]]; then
+        info "Presetting vault passphrase into gpg-agent…"
+        local pres
+        pres=$(printf '%s\n' "${vault_pp}" | gssh -- 'bash -lc "bash $HOME/.omp-vault/preset.sh"' 2>&1) \
+            || die "passphrase preset failed: ${pres}"
+        case "${pres}" in *PRESET_OK*) ok "Passphrase cached for launch" ;; *) die "preset: unexpected output: ${pres}" ;; esac
+    fi
 
     # Launch detached. bash -lc sources ~/.profile so omp is on PATH inside tmux.
     info "Launching omp under tmux…"
@@ -284,6 +423,7 @@ shift 2>/dev/null || true
 
 case "${SUBCOMMAND}" in
     setup)          cmd_setup "$@" ;;
+    tune)           cmd_tune "$@" ;;
     vault-add)      cmd_vault_add "$@" ;;
     vault-ls)       cmd_vault_ls "$@" ;;
     new)            cmd_new "$@" ;;

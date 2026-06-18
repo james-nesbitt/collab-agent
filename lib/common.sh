@@ -78,7 +78,7 @@ instance_status() {
     gcloud compute instances describe "${INSTANCE_NAME}" \
         --project="${GCP_PROJECT}" \
         --zone="${ZONE}" \
-        --format="value(status)" 2>/dev/null || echo "NOT_FOUND"
+        --format="value(status)" </dev/null 2>/dev/null || echo "NOT_FOUND"
 }
 
 require_running() {

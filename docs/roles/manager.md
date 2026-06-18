@@ -21,17 +21,53 @@ steers with `tmux send-keys` / `capture-pane`.
 ./manager.sh setup
 ```
 
-One idempotent command does three things:
+One idempotent command does several things:
 
 1. Turns on global secret obfuscation (`secrets.enabled`) so credential values are
    replaced with `#XXXX#` before any text reaches the model.
 2. Ensures the credential vault exists at `~/.omp-vault` on the VM (a no-passphrase
    `pass` store).
-3. Installs the global rules, context, and the credential-access skill into
-   `~/.omp/agent/` so every session inherits them.
+3. Installs the global assets into `~/.omp/agent/` so every session inherits them: the
+   context (`AGENTS.md`), always-apply rules (`RULES.md` plus five behaviour/safety rule
+   files under `rules/`), the `commit-push-pr` command, secret-shape patterns
+   (`secrets.yml`), and the `credential-access` + `mirantis-services` skills.
+4. Applies portable agent tuning via `omp config set` — editor/task defaults plus
+   `modelRoles` (default `claude-sonnet-4-6`, plan `claude-opus-4-8`, slow + smol
+   `claude-haiku-4-5`; all Anthropic models the VM is already authenticated for).
 
-You'll see `SETUP_OK` and the four installed asset paths. Re-run it any time you change
+You'll see `SETUP_OK` and the installed asset paths. Re-run it any time you change
 the files under `platform/` — it just overwrites them.
+
+### Optional: protect the vault with a passphrase
+
+By default the vault key has no passphrase (Tier-1: any in-session participant can
+decrypt). For protection against disk theft or other VM users, run:
+
+```bash
+./manager.sh setup --passphrase
+```
+
+You'll be prompted for a passphrase (twice). The vault key is then passphrase-protected.
+From then on, `./manager.sh new` prompts you for the passphrase and presets it into the
+VM's `gpg-agent` just before launch, so the session can decrypt — the passphrase is
+read locally, never written to disk, and lives only in agent memory. Keep the passphrase
+off the VM (your laptop / a secrets manager). This does **not** hide credentials from
+joined guests of a running session — that's Tier-2 (see the planning doc).
+
+### Optional: tune the agent's local models
+
+Two extra capabilities are off by default and turned on with `tune`:
+
+```bash
+./manager.sh tune --memory      # mnemopi long-term memory across sessions
+./manager.sh tune --thinking    # automatic per-turn thinking-level selection
+./manager.sh tune               # both
+```
+
+Both run on **local on-device ONNX models** (`qwen3-1.7b`), CPU-only, auto-downloaded
+from Hugging Face on first use — no Ollama and no extra credentials. `tune` is
+idempotent config (`omp config set`) and does not disturb running sessions. Expect
+`TUNE_OK`.
 
 ## 2. Store the credentials people will need
 
@@ -55,6 +91,17 @@ omp's `TOKEN` pattern and is auto-obfuscated. End an entry with a secret keyword
 (`token`, `key`, `secret`, `password`) so this fires. If you must use a name that
 doesn't, add a value-shape regex to `platform/secrets.yml` and re-run `setup`, or the
 value won't be obfuscated.
+
+**The `mirantis-services` skill needs two entries.** It calls JIRA and Confluence with
+one Atlassian Cloud token (one account serves both):
+
+```bash
+printf '%s' "$ATLASSIAN_EMAIL" | ./manager.sh vault-add services/atlassian/email
+printf '%s' "$ATLASSIAN_TOKEN" | ./manager.sh vault-add services/atlassian/token
+```
+
+They inject as `ATLASSIAN_EMAIL` / `ATLASSIAN_TOKEN`. The `token` entry auto-obfuscates
+(name ends in `token`); `email` is not a secret.
 
 ## 3. Launch a session
 

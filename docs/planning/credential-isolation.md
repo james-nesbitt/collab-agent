@@ -16,6 +16,15 @@
     `#XXXX#` placeholders before outbound text reaches the model.
     `~/.omp/agent/secrets.yml` carries value-shape regex backstops for any var whose
     name lacks a secret keyword.
+  - **Optional passphrase (at-rest hardening):** `manager.sh setup --passphrase`
+    instead creates a passphrase-protected vault key. The passphrase is read locally
+    (never argv/disk) and, at session start, `manager.sh new` presets it into the VM's
+    `gpg-agent` over SSH on stdin just before launch, so the detached launcher decrypts
+    with `pass show` and no pinentry prompt; it lives only in agent memory (bounded by
+    `max-cache-ttl`). This protects the vault against disk theft / other local users.
+    It does **not** change the G/R in-session exposure below — once the launcher
+    exports secrets into the omp process env, an in-session guest (the same OS user)
+    can read them regardless. That gap is Tier 2.
 
 ### POC findings (verbatim)
 

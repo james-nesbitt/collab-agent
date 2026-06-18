@@ -20,7 +20,7 @@ Review of the remote-agent-machine scripts, docs, and skills for security weakne
 | --- | --- | --- | --- |
 | F1 | Medium | Session name not validated in `attach`/`kill`/`collab` → remote command injection | **Fixed** |
 | F2 | Medium | `valid_token` allows `/` in names → breaks `sed` delimiter, risks local exec | **Fixed** |
-| F3 | Low | No-passphrase GPG key; vault dir perms not hardened | Open (Tier-1 accepted) |
+| F3 | Low | No-passphrase GPG key; vault dir perms not hardened | **Addressed** — optional `setup --passphrase`; `chmod 700` added |
 | F4 | Low | Supply chain: unpinned `curl \| sh` and global installs in `bootstrap` | Open (recommendation) |
 | F5 | Low | Docs don't forbid `-v`/`--trace`/`set -x` with secrets | Open (recommendation) |
 | F6 | Info | `collab` shares a write-capable link by default | Open (by design) |
@@ -73,7 +73,7 @@ malformed tmux target and session path.
 `/`-allowing `valid_token` is retained only for vault entries and subtrees, which
 legitimately need it (`services/github/token`).
 
-### F3 — No-passphrase GPG key; vault directory perms not hardened (Low) — Open
+### F3 — No-passphrase GPG key; vault directory perms not hardened (Low) — Addressed
 
 The vault key is generated with `%no-protection` (no passphrase). This is the documented
 **Tier-1** boundary: any process running as the omp user — including a collab guest, who
@@ -86,6 +86,16 @@ key, so confidentiality against *other local users* holds as long as `gnupg/` st
 **Recommendation:** `chmod 700 ~/.omp-vault` in `setup` for defense-in-depth. The
 in-session-guest exposure is the known Tier-1 limitation; the real fix is the Tier-2
 per-session OS isolation tracked in [credential-isolation.md](credential-isolation.md).
+
+**Update — implemented.** `manager.sh setup --passphrase` now creates a
+passphrase-protected ed25519 vault key; `manager.sh new` reads the passphrase locally
+(never argv) and presets it into `gpg-agent` over SSH on stdin just before launch, so
+the detached session launcher decrypts with `pass show` and no pinentry prompt. The
+passphrase lives only in `gpg-agent` memory (bounded by `max-cache-ttl`) and never
+touches disk. Both vault paths now also `chmod 700 ~/.omp-vault`. This closes the
+at-rest / other-local-user gap; the in-session-guest exposure (G) remains the Tier-1
+limitation that only Tier-2 OS isolation resolves. See
+[credential-isolation.md](credential-isolation.md).
 
 ### F4 — Supply chain: unpinned installs in `bootstrap` (Low) — Open
 
