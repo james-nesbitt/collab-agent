@@ -105,7 +105,7 @@ POC findings (verbatim — these define the trust boundary):
 - **G = guest EXPOSED** — a joined guest sees the real value on the final
   de-obfuscated render and in any tool card. **Joiners are inside the credential trust
   boundary.** Hiding credentials from guests requires Tier-2 OS isolation (see
-  `TODO-per-session-credentials.md`).
+  [`planning/credential-isolation.md`](planning/credential-isolation.md)).
 - **R = conditional FAIL** — omp persists `toolResult` blocks de-obfuscated into the
   session `.jsonl`, so a secret leaks to disk **only if a tool prints it**. Operational
   rule (enforced by `RULES.md`): never echo/print/log a credential; consume it inline.
