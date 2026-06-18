@@ -1,11 +1,11 @@
 # Shared Remote Agent Machine — Architecture
 
-A single always-on GCP VM hosts one omp agent session as a **headless RPC
-server**. The session is fanned out to many user machines via **collab** over an
-E2E-encrypted relay. RPC is the control plane (lifecycle, automation); collab is
-the data plane (human participants).
+A single always-on GCP VM hosts an **interactive omp agent session under tmux**. The
+session is fanned out to many user machines via **collab** over an E2E-encrypted relay.
+The **manager** drives session lifecycle and `/collab` over `gcloud ssh` (`tmux
+send-keys` / `capture-pane`); guests join the same live session from any machine.
 
-Sources: `omp://rpc.md`, <https://omp.sh/docs/collab>.
+Sources: <https://omp.sh/docs/collab>.
 
 ---
 
@@ -13,27 +13,38 @@ Sources: `omp://rpc.md`, <https://omp.sh/docs/collab>.
 
 | Goal | Mechanism |
 | --- | --- |
-| One long-lived agent session, survives laptop sleep | RPC server under tmux on VM |
+| One long-lived agent session, survives laptop sleep | interactive omp under tmux on the VM |
 | Many users, many machines, live shared view + steering | collab `/collab` → `omp join` |
-| Programmatic lifecycle (start, model, re-share, health) | RPC JSONL over stdio |
+| Per-session credentials, hidden from the model | vault → env injection + `secrets.enabled` |
 | Zero inbound ports on the VM | host + guests dial the relay outbound |
-| Repo, toolchain, docker/podman centralized | all tools execute host-side on VM |
+| Repo, toolchain, docker/podman centralized | all tools execute host-side on the VM |
 
-Non-goals: multi-session multiplexing (one session per server process),
-guest-side tool execution (always host-side), relay-side plaintext (never).
+Non-goals: guest-side tool execution (always host-side), relay-side plaintext (never),
+a headless programmatic-control protocol (the manager drives the interactive TUI under tmux instead).
 
 ---
 
-## 2. Topology
+## 2. Roles
+
+| Role | Surface | Owns |
+| --- | --- | --- |
+| **Administrator** | `administrator.sh` | GCP/VM lifecycle: provision, start/stop, bootstrap (OS packages + mise/bun/omp), ssh, destroy. |
+| **Manager** | `manager.sh` | VM-wide omp platform config (global `secrets.enabled`, global skills + `RULES.md`/`AGENTS.md` + `secrets.yml`, the `pass` vault) **and** per-session lifecycle (create with seeded `.omp/` + injected creds, attach/list/kill, share collab link). |
+| **Operator / joiner** | *(no script)* | Interacts only by `omp join`-ing the shared session. Behaviour is governed by the global `RULES.md`/`AGENTS.md` and skills the manager installs. |
+
+---
+
+## 3. Topology
 
 ```mermaid
 graph TB
   subgraph VM["GCP VM (omp-agent, always-on)"]
     TM["tmux"]
-    CTL["controller<br/>(owns stdio)"]
-    RPC["omp --mode rpc<br/>(AgentSession)"]
+    OMP["omp (interactive TUI,<br/>AgentSession)"]
     TOOLS["tools: bash, edit,<br/>lsp, docker, podman"]
-    TM --> CTL --> RPC --> TOOLS
+    VAULT["pass vault<br/>(~/.omp-vault)"]
+    TM --> OMP --> TOOLS
+    VAULT -. "env injection<br/>at launch" .-> OMP
   end
   RELAY["relay<br/>wss://my.omp.sh<br/>(or self-hosted)"]
   subgraph U1["laptop A"]
@@ -45,149 +56,73 @@ graph TB
   subgraph U3["any browser"]
     WB["web client<br/>(served by relay /)"]
   end
-  RPC -. "collab module<br/>(outbound wss)" .-> RELAY
+  OMP -. "collab module<br/>(outbound wss)" .-> RELAY
   RELAY <--> J1
   RELAY <--> J2
   RELAY <--> WB
-  OP["operator @ laptop"] -->|"gcloud ssh + IAP"| TM
+  MGR["manager @ laptop"] -->|"gcloud ssh + IAP<br/>tmux send-keys / capture-pane"| TM
 ```
 
-Key property: the VM and every guest **dial out** to the relay. No inbound
-firewall rule on the VM is required for sharing; SSH control rides IAP.
+Key property: the VM and every guest **dial out** to the relay. No inbound firewall
+rule on the VM is required for sharing; manager control rides IAP.
 
 ---
 
-## 3. Components
+## 4. Components
 
 | Component | Role | Transport |
 | --- | --- | --- |
-| `omp --mode rpc` | The agent host. Owns the single `AgentSession`; runs all tools. | JSONL over stdio |
-| controller | Supervises the RPC child: bootstraps collab, parses the link, watches events, re-shares, exposes health. | spawns child; reads/writes stdio |
-| tmux | Keeps controller+child alive across SSH disconnects. | — |
+| `omp` (interactive) | The agent host. Owns the single `AgentSession`; runs all tools. | TUI inside tmux |
+| tmux | Keeps the session alive across SSH disconnects; the manager drives it via `send-keys`/`capture-pane`. | — |
+| `pass` vault | At-rest, GPG-encrypted credential store on the VM. A per-session launcher decrypts the configured subtree and exports it as env vars before `exec omp`. | local fs |
 | collab module (in-process) | Seals session frames (AES-256-GCM), multiplexes guests, dials the relay. | outbound wss |
 | relay | Blind rendezvous. Routes opaque ciphertext between host and guests; serves the browser client at `/`. | wss |
 | `omp join` / web client | Guests. Render the session natively; prompt/interrupt if write-capable. | wss to relay |
-| operator SSH | Out-of-band lifecycle (start server, attach tmux, inspect). | ssh via IAP |
+| manager SSH | Out-of-band lifecycle + `/collab` driving (`gcloud ssh` + IAP). | ssh via IAP |
 
 ---
 
-## 4. Two planes, one session
+## 5. Credentials
 
-The crux: **control plane (RPC/stdio)** and **data plane (collab/relay)** both
-act on the *same in-process `AgentSession`*. RPC drives it locally and
-programmatically; collab projects it to remote humans.
+Design (selected POC, "Approach A"): **env injection from a `pass` vault + global
+`secrets.enabled` obfuscation.**
 
-```mermaid
-flowchart LR
-  subgraph HOST["VM host process: omp --mode rpc"]
-    AS["AgentSession<br/>(single source of truth)"]
-    COLLAB["collab module"]
-    STDIO["stdio JSONL loop"]
-    AS <--> COLLAB
-    AS <--> STDIO
-  end
+- The manager keeps a no-passphrase ed25519 `pass` vault at `~/.omp-vault` on the VM.
+  Entries live under a subtree (default `services`), e.g. `services/github/token`.
+- `manager.sh new` generates a per-session launcher that decrypts the whole subtree
+  and exports each entry as an env var, then `exec omp`. The entry path maps to the
+  var name (`/` and `-` → `_`, uppercased), so `services/github/token` → `GITHUB_TOKEN`
+  — which matches omp's `TOKEN` secret-name pattern. The launcher contains only
+  `pass show` commands, never values.
+- Global `secrets.enabled: true` replaces matched env-var values with `#XXXX#`
+  placeholders before any outbound text reaches the model. `~/.omp/agent/secrets.yml`
+  holds value-shape regex backstops for vars whose name lacks a secret keyword.
 
-  CTL["controller"] -->|"commands: prompt, set_model,<br/>get_state, abort"| STDIO
-  STDIO -->|"events: agent_*, message_*,<br/>command_output, prompt_result"| CTL
+POC findings (verbatim — these define the trust boundary):
 
-  COLLAB -->|"sealed frames"| RELAY["relay"]
-  RELAY -->|"sealed frames"| COLLAB
+- **M = PASS** — the model only ever receives the `#XXXX#` placeholder, never the real
+  value.
+- **G = guest EXPOSED** — a joined guest sees the real value on the final
+  de-obfuscated render and in any tool card. **Joiners are inside the credential trust
+  boundary.** Hiding credentials from guests requires Tier-2 OS isolation (see
+  `TODO-per-session-credentials.md`).
+- **R = conditional FAIL** — omp persists `toolResult` blocks de-obfuscated into the
+  session `.jsonl`, so a secret leaks to disk **only if a tool prints it**. Operational
+  rule (enforced by `RULES.md`): never echo/print/log a credential; consume it inline.
 
-  RELAY <--> G1["guest: omp join"]
-  RELAY <--> G2["guest: web client"]
-
-  classDef plane fill:#1b2a4a,stroke:#5b8def,color:#dce6ff;
-  class CTL,STDIO plane;
-```
-
-- **Control plane** (stdio): the controller issues `RpcCommand`s and consumes
-  `AgentSessionEvent`s. This is how `/collab` is started headlessly and how the
-  server is steered/monitored without a human at the TUI.
-- **Data plane** (relay): collab serializes session entries/events/state/prompts,
-  seals each payload, and exchanges them with guests through the relay.
-
-Guest prompts enter the same `AgentSession` the controller sees; the controller
-observes guest-originated turns as ordinary `agent_start`/`message_*`/`agent_end`
-events on stdio.
+The no-passphrase vault is the documented **Tier-1** boundary: any in-session
+participant can decrypt. Tier-2 (per-session OS isolation) is the fix and is tracked,
+not built.
 
 ---
 
-## 5. RPC server: process & framing
-
-```mermaid
-graph LR
-  subgraph tmux
-    CTL["controller"]
-  end
-  CTL -- spawn --> P["omp --mode rpc"]
-  CTL == "stdin: RpcCommand / *_response / *_result" ==> P
-  P == "stdout: ready, response, events,<br/>command_output, host_tool_call, ..." ==> CTL
-```
-
-Framing (from `omp://rpc.md`): one JSON object per line.
-
-- Startup emits `{ "type": "ready" }` before accepting commands.
-- `@file` args rejected in RPC mode; auto-title suppressed; workflow settings
-  (`todo.*`, `task.*`, `memory.*`, `advisor.*`, `async.*`, `bash.autoBackground.*`)
-  reset to built-in defaults.
-- Stdin close → pending host-tool / host-URI calls rejected → exit 0.
-- `prompt` / `abort_and_prompt` are **acked on acceptance, not completion**.
-  Agent turns complete via `agent_end`; local-only slash commands complete via
-  `data.agentInvoked: false` or a later `prompt_result`, after emitting
-  `command_output` frames.
-
-Inbound (stdin) | Outbound (stdout)
---- | ---
-`RpcCommand` | `ready`, `response`
-`extension_ui_response` | `AgentSessionEvent` (`agent_*`, `turn_*`, `message_*`, `tool_execution_*`)
-`host_tool_update` / `host_tool_result` | `extension_ui_request`
-`host_uri_result` | `host_tool_call` / `host_tool_cancel`
-| `host_uri_request` / `host_uri_cancel`
-| `command_output`, `session_info_update`, `config_update`
-| `available_commands_update`, `prompt_result`
-| `subagent_lifecycle` / `subagent_progress` / `subagent_event`
-
----
-
-## 6. Collab bootstrap (headless)
-
-The controller starts sharing by sending `/collab` as a `prompt` frame, then
-scrapes the join link from `command_output`.
-
-```mermaid
-sequenceDiagram
-  participant C as controller
-  participant R as omp --mode rpc
-  participant Y as relay
-  C->>R: spawn
-  R-->>C: {type:"ready"}
-  opt pin model
-    C->>R: {id:"m", type:"set_model", provider, modelId}
-    R-->>C: {type:"response", command:"set_model", success:true}
-  end
-  C->>R: {id:"cb", type:"prompt", message:"/collab"}
-  R-->>C: {type:"response", command:"prompt", success:true}
-  R->>Y: open session room (outbound wss)
-  Y-->>R: room established
-  R-->>C: {type:"command_output", ...link...}
-  R-->>C: {type:"prompt_result", id:"cb", agentInvoked:false}
-  Note over C: parse link → publish<br/>(file / status endpoint / IRC)
-```
-
-The link (`<roomId>#<key>`) is the only secret a guest needs. The controller
-persists it (e.g. `~/collab.link` on the VM, or prints it) for retrieval via
-`manage.sh`/`session.sh`. `/collab view` yields a read-only variant.
-
----
-
-## 7. Guest join + prompt round trip
+## 6. Guest join + prompt round trip
 
 ```mermaid
 sequenceDiagram
   participant G as omp join (guest)
   participant Y as relay
   participant H as host AgentSession
-  participant C as controller (stdio observer)
 
   G->>Y: connect room, present key (+ write token?)
   Y-->>H: routing prefix + sealed hello
@@ -198,20 +133,16 @@ sequenceDiagram
   G->>Y: sealed prompt ("fix the failing test")
   Y-->>H: deliver prompt (badged with guest name)
   H->>H: AgentSession.prompt() → agent turn
-  par data plane
-    H-->>Y: sealed message/tool deltas
-    Y-->>G: live stream
-  and control plane
-    H-->>C: agent_start / message_update / tool_execution_* / agent_end
-  end
+  H-->>Y: sealed message/tool deltas
+  Y-->>G: live stream
 ```
 
-Names are display-only; the LLM sees prompt text verbatim. A guest's `Esc`
-interrupt rides the same sealed channel and maps to the host's abort path.
+Names are display-only; the LLM sees prompt text verbatim. A guest's `Esc` interrupt
+rides the same sealed channel and maps to the host's abort path.
 
 ---
 
-## 8. Trust & permission layering
+## 7. Trust & permission layering
 
 ```mermaid
 graph TD
@@ -229,13 +160,13 @@ graph TD
 ```
 
 Enforcement is by the link itself: the host verifies the write token at join and
-rejects writes from tokenless peers (they show read-only in the participants
-list). Guests keep a small local allowlist (`/dump`, `/export`, `/copy`,
-`/help`, `/hotkeys`, `/theme`, `/settings`, `/leave`, `/collab`, `/exit`).
+rejects writes from tokenless peers (they show read-only in the participants list).
+Guests keep a small local allowlist (`/dump`, `/export`, `/copy`, `/help`, `/hotkeys`,
+`/theme`, `/settings`, `/leave`, `/collab`, `/exit`).
 
 ---
 
-## 9. Encryption & what the relay sees
+## 8. Encryption & what the relay sees
 
 ```mermaid
 graph LR
@@ -249,99 +180,84 @@ graph LR
   class META m;
 ```
 
-The key lives in the URL fragment (`#<key>`), never sent in any HTTP request,
-never reaching the relay. Possession of the link is the entire trust boundary —
-treat full and view-only links as secrets.
+The key lives in the URL fragment (`#<key>`), never sent in any HTTP request, never
+reaching the relay. Possession of the link is the entire trust boundary — treat full
+and view-only links as secrets.
 
 ---
 
-## 10. Network & auth matrix
+## 9. Network & auth matrix
 
 | Path | Direction | Port/Proto | Auth |
 | --- | --- | --- | --- |
-| operator → VM (control) | outbound from laptop | 443 → IAP → 22 | Google IAM (OS Login + `iap.tunnelResourceAccessor`) |
+| manager → VM (control) | outbound from laptop | 443 → IAP → 22 | Google IAM (OS Login + `iap.tunnelResourceAccessor`) |
 | VM host → relay (data) | outbound from VM | 443 wss | room key (E2E); relay blind |
 | guest → relay (data) | outbound from guest | 443 wss | link (key ± write token) |
 | browser → relay (client) | outbound | 443 https + wss | link in fragment |
 
-No inbound ports open on the VM for collab. The legacy 7077 firewall rule from
-the earlier container design is unused and removed on `manage.sh destroy`.
+No inbound ports open on the VM for collab. The legacy 7077 firewall rule from the
+earlier container design is unused and removed on `administrator.sh destroy`.
 
 ---
 
-## 11. Session lifecycle
+## 10. Session lifecycle
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Booting: controller spawns rpc
-  Booting --> Idle: {type:"ready"}
-  Idle --> Hosting: prompt "/collab" → link
+  [*] --> Launching: manager.sh new (launcher injects creds → exec omp)
+  Launching --> Idle: omp composer ready
+  Idle --> Hosting: manager.sh collab → /collab → link
   Hosting --> Hosting: guests join / leave / prompt
   Hosting --> Idle: "/collab stop"
-  Idle --> [*]: stdin close → exit 0
-  Hosting --> Booting: crash → controller restart
+  Idle --> [*]: manager.sh kill
   note right of Hosting
     relay room persists only while
-    host process holds it; link is
-    re-minted on restart
+    the omp process holds it; link is
+    re-minted on relaunch
   end note
 ```
 
-A host restart mints a new room/link (re-published by the controller). Guests
-reconnect with the new link; their prior local session is restored on `/leave`.
+A relaunch mints a new room/link (re-shared via `manager.sh collab`). Guests reconnect
+with the new link; their prior local session is restored on `/leave`.
 
 ---
 
-## 12. Failure modes
+## 11. Failure modes
 
 | Failure | Detection | Recovery |
 | --- | --- | --- |
-| rpc child crash | controller sees stdout EOF | respawn, re-`/collab`, re-publish link |
 | relay unreachable | collab connect error event | retry with backoff; link stable across retries |
-| VM stop/restart | tmux + controller gone | `manage.sh start` → controller re-bootstraps |
+| VM stop/restart | tmux gone | `administrator.sh start` → `manager.sh new` |
 | guest write without token | host token verify fails | guest downgraded to read-only |
 | turn streaming at guest join | v1 limit | guest sees it from next message boundary |
-| stdin parse error | `command:"parse"` response | loop continues; controller logs and proceeds |
+| credential printed by a tool | value lands in `.jsonl` / on guest screens | `RULES.md` forbids printing; rotate the leaked entry |
 
 ---
 
-## 13. Implementation sketch
-
-Controller responsibilities (single small process, runs in tmux on the VM):
-
-1. `spawn("omp", ["--mode","rpc", ...launchOpts])`; wait for `ready`.
-2. Optional `set_model`, `set_thinking_level`, pre-seed `set_todos`.
-3. `prompt "/collab"` (or `"/collab view"`); read `command_output`, extract link.
-4. Publish link: write `local://collab.link` equivalent on VM + log; expose via
-   `session.sh collab` from the operator laptop.
-5. Subscribe to events for health/observability (`agent_*`, `subagent_*`).
-6. Supervise: on child exit, respawn and re-bootstrap.
-7. (Optional) accept operator commands (re-share, rotate to view-only, status)
-   over a local unix socket.
-
-Operator surface (extends existing scripts):
+## 12. Operator surface
 
 | Command | Action |
 | --- | --- |
-| `manage.sh start` | start the VM |
-| `session.sh serve` | start controller+rpc under tmux (idempotent) |
-| `session.sh collab [view]` | print current join link (re-share if needed) |
-| `session.sh status` | participants + host state via controller |
+| `administrator.sh start` | start the VM |
+| `manager.sh setup` | enable `secrets.enabled`, ensure the vault, install global assets |
+| `manager.sh vault-add ENTRY` | insert a credential (value on stdin, never echoed) |
+| `manager.sh new NAME [--subtree SUB]` | launch a session with seeded `.omp/` + injected creds |
+| `manager.sh collab [NAME] [view]` | print the current join link (re-share if needed) |
+| `manager.sh attach [NAME]` | attach to a session (most recent if NAME omitted) |
 | `omp join "<link>"` | from any user machine |
-
-Minimal alternative (no controller): run `omp` interactively under tmux and type
-`/collab` by hand. Loses programmatic lifecycle and headless restart; use only
-for a quick trial.
 
 ---
 
-## 14. Why this shape
+## 13. Why this shape
 
-- **RPC server, not interactive TUI on the host**: headless, scriptable
-  lifecycle (start/restart/model/health) without a human attached; the session
-  outlives any terminal.
-- **collab for users, not SSH-shared tmux**: guests get a native rendered
-  session (tool cards, subagent hub, footer state) and per-link permissions,
-  not a raw mirrored terminal; works from a browser with nothing installed.
-- **relay dial-out both sides**: no inbound exposure on the VM; the relay is a
-  blind ciphertext router, so the trust boundary collapses to link possession.
+- **Interactive omp under tmux, driven by the manager**: the session outlives any
+  terminal and survives laptop sleep; the manager steers lifecycle and `/collab`
+  out-of-band over IAP without a human pinned to the TUI.
+- **collab for users, not SSH-shared tmux**: guests get a native rendered session
+  (tool cards, subagent hub, footer state) and per-link permissions, not a raw mirrored
+  terminal; works from a browser with nothing installed.
+- **relay dial-out both sides**: no inbound exposure on the VM; the relay is a blind
+  ciphertext router, so the trust boundary collapses to link possession.
+- **vault + obfuscation for credentials**: secrets stay off the model (M=PASS) and at
+  rest in GPG ciphertext; the residual exposure to in-session guests (G) and to a
+  printing tool (R) is documented and bounded by `RULES.md` + the Tier-2 roadmap.

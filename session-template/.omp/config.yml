@@ -1,0 +1,5 @@
+# Per-session project config (seeded by ./manager.sh new).
+# Its presence makes <workdir>/.omp/ a project root so that this folder's
+# AGENTS.md and skills/ are discovered at session startup. Add session-specific
+# settings here as needed.
+{}
