@@ -48,6 +48,9 @@ fix. Details: [docs/planning/credential-isolation.md](docs/planning/credential-i
 ## Repository layout
 
 ```
+.omp/skills/                  # project skills: an agent in this repo can act as a role
+  administrator/              #   drive administrator.sh (VM lifecycle)
+  manager/                    #   drive manager.sh (platform config + sessions)
 administrator.sh              # administrator role: VM lifecycle
 manager.sh                    # manager role: platform config + sessions
 lib/common.sh                 # shared config + gcloud/ssh helpers (sourced)
