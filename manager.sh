@@ -6,8 +6,10 @@
 #   ./manager.sh <subcommand> [args...]
 #
 # Platform config (global, idempotent):
-#   setup                    Enable secret obfuscation, ensure the credential
+#   setup [--passphrase]     Enable secret obfuscation, ensure the credential
 #                            vault, and install global skills/RULES.md/AGENTS.md.
+#                            --passphrase: protect the vault key with a passphrase
+#                            (prompted; injected at session start, never stored).
 #   vault-add ENTRY          Insert a vault entry (value read from stdin, never
 #                            echoed), e.g.  printf '%s' "$TOK" | ./manager.sh \
 #                            vault-add services/github/token
@@ -78,30 +80,71 @@ valid_token() { [[ "$1" =~ ^[A-Za-z0-9_/-]+$ ]]; }
 # interpolate into remote tmux -t targets, filesystem paths, and the sed delimiter).
 valid_name() { [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]]; }
 
+# Create/ensure a passphrase-protected vault on the VM. Takes the passphrase as $1
+# (read by the caller before any SSH call), uploads the VM-side helpers, and runs
+# keygen with the passphrase streamed over SSH on stdin (never argv, never disk).
+setup_vault_passphrase() {
+    local pp="$1"
+    info "Ensuring passphrase-protected credential vault at \$HOME/.omp-vault…"
+    remote "bash -lc 'mkdir -p ~/.omp-vault; command -v pass >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq pass; command -v gpg >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gnupg'" </dev/null >/dev/null
+    upload "${SCRIPT_DIR}/platform/vault/init-vault.sh" '~/.omp-vault/init-vault.sh'
+    upload "${SCRIPT_DIR}/platform/vault/preset.sh"     '~/.omp-vault/preset.sh'
+    local out
+    out=$(printf '%s\n' "${pp}" | gssh -- 'bash -lc "bash $HOME/.omp-vault/init-vault.sh"' 2>&1) \
+        || die "vault init failed: ${out}"
+    case "${out}" in
+        *VAULT_OK*)     ok "Passphrase-protected vault created" ;;
+        *VAULT_EXISTS*) warn "Vault already exists at ~/.omp-vault — left unchanged (passphrase not applied). Remove it on the VM to recreate." ;;
+        *)              die "vault init: unexpected output: ${out}" ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
 # Platform config subcommands
 # ---------------------------------------------------------------------------
 cmd_setup() {
+    local passphrase_mode=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --passphrase) passphrase_mode=true; shift ;;
+            *) die "Unknown setup option: $1 (use --passphrase)" ;;
+        esac
+    done
+
+    # Read the passphrase up front, before any SSH call can consume stdin.
+    local pp=""
+    if [[ "${passphrase_mode}" == true ]]; then
+        local pp2
+        read -rsp "New vault passphrase: " pp; echo >&2
+        read -rsp "Confirm passphrase:   " pp2; echo >&2
+        [[ -n "${pp}" ]] || die "Empty passphrase."
+        [[ "${pp}" == "${pp2}" ]] || die "Passphrases do not match."
+    fi
+
     require_running
 
     # 1. Global secret obfuscation.
     info "Enabling omp secret obfuscation (global)…"
     local got
-    got=$(remote "bash -lc 'omp config set secrets.enabled true >/dev/null 2>&1; omp config get secrets.enabled'" | tr -d '[:space:]')
+    got=$(remote "bash -lc 'omp config set secrets.enabled true >/dev/null 2>&1; omp config get secrets.enabled'" </dev/null | tr -d '[:space:]')
     [[ "${got}" == "true" ]] || die "secrets.enabled is '${got}', expected 'true'"
     ok "secrets.enabled=true"
 
-    # 2. Credential vault (no-passphrase ed25519 — documented Tier-1 boundary:
-    #    any in-session participant can decrypt; Tier-2 OS isolation is the fix).
-    info "Ensuring credential vault at \$HOME/.omp-vault…"
-    gssh -- 'bash -s' <<'VAULT' | grep -q VAULT_OK || die "vault init failed"
+    # 2. Credential vault.
+    if [[ "${passphrase_mode}" == true ]]; then
+        setup_vault_passphrase "${pp}"
+    else
+        # No-passphrase ed25519 (Tier-1: any in-session participant can decrypt).
+        # For at-rest / other-local-user protection: ./manager.sh setup --passphrase
+        info "Ensuring credential vault at \$HOME/.omp-vault (no passphrase)…"
+        gssh -- 'bash -s' <<'VAULT' | grep -q VAULT_OK || die "vault init failed"
 set -e
 command -v pass >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq pass
 command -v gpg  >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gnupg
 VDIR="$HOME/.omp-vault"
 export GNUPGHOME="$VDIR/gnupg" PASSWORD_STORE_DIR="$VDIR/store"
 if [ ! -d "$PASSWORD_STORE_DIR" ]; then
-  mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"
+  mkdir -p "$GNUPGHOME"; chmod 700 "$VDIR" "$GNUPGHOME"
   cat > /tmp/omp-vault-keyparams <<'KP'
 %no-protection
 Key-Type: eddsa
@@ -120,7 +163,8 @@ KP
 fi
 echo VAULT_OK
 VAULT
-    ok "Vault ready"
+        ok "Vault ready"
+    fi
 
     # 3. Global platform assets.
     info "Installing global platform assets to ~/.omp/agent/…"
@@ -179,6 +223,15 @@ cmd_new() {
     valid_token "${subtree}" || die "Invalid subtree: ${subtree}"
     require_running
 
+    # Detect a passphrase-protected vault and read the passphrase up front, BEFORE
+    # any stdin-consuming SSH call (e.g. session_exists), so a forwarded SSH channel
+    # cannot swallow it. Read locally; never argv.
+    local vault_pp=""
+    if remote "test -f ~/.omp-vault/.passphrase-protected" </dev/null 2>/dev/null; then
+        read -rsp "Vault passphrase: " vault_pp; echo >&2
+        [[ -n "${vault_pp}" ]] || die "Empty passphrase; aborting."
+    fi
+
     if session_exists "${name}"; then
         die "Session '${name}' already exists. Use: ./manager.sh attach ${name}"
     fi
@@ -219,6 +272,18 @@ NEW
     upload "${SCRIPT_DIR}/session-template/.omp/config.yml" "~/sessions/${name}/.omp/config.yml"
     sed "s/__SESSION_NAME__/${name}/g" "${SCRIPT_DIR}/session-template/.omp/AGENTS.md" \
         | remote "cat > ~/sessions/${name}/.omp/AGENTS.md"
+
+    # Passphrase-protected vault: preset the passphrase into gpg-agent on the VM
+    # right before launch so the detached launcher's `pass show` calls decrypt
+    # without a pinentry prompt. Streamed over SSH on stdin; cached only in
+    # gpg-agent memory (bounded by max-cache-ttl).
+    if [[ -n "${vault_pp}" ]]; then
+        info "Presetting vault passphrase into gpg-agent…"
+        local pres
+        pres=$(printf '%s\n' "${vault_pp}" | gssh -- 'bash -lc "bash $HOME/.omp-vault/preset.sh"' 2>&1) \
+            || die "passphrase preset failed: ${pres}"
+        case "${pres}" in *PRESET_OK*) ok "Passphrase cached for launch" ;; *) die "preset: unexpected output: ${pres}" ;; esac
+    fi
 
     # Launch detached. bash -lc sources ~/.profile so omp is on PATH inside tmux.
     info "Launching omp under tmux…"

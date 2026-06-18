@@ -33,6 +33,22 @@ One idempotent command does three things:
 You'll see `SETUP_OK` and the four installed asset paths. Re-run it any time you change
 the files under `platform/` — it just overwrites them.
 
+### Optional: protect the vault with a passphrase
+
+By default the vault key has no passphrase (Tier-1: any in-session participant can
+decrypt). For protection against disk theft or other VM users, run:
+
+```bash
+./manager.sh setup --passphrase
+```
+
+You'll be prompted for a passphrase (twice). The vault key is then passphrase-protected.
+From then on, `./manager.sh new` prompts you for the passphrase and presets it into the
+VM's `gpg-agent` just before launch, so the session can decrypt — the passphrase is
+read locally, never written to disk, and lives only in agent memory. Keep the passphrase
+off the VM (your laptop / a secrets manager). This does **not** hide credentials from
+joined guests of a running session — that's Tier-2 (see the planning doc).
+
 ## 2. Store the credentials people will need
 
 Credentials live in the vault under a subtree (default `services`). Add one by piping

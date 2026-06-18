@@ -18,6 +18,7 @@ Full reference: read `docs/roles/manager.md`. Credential design and the trust bo
 | Intent | Command |
 | --- | --- |
 | Configure platform (secrets + vault + global assets), idempotent | `./manager.sh setup` |
+| Configure with a passphrase-protected vault | `./manager.sh setup --passphrase` (prompts; `new` then prompts + presets at launch) |
 | Store a credential (value on **stdin**) | `printf '%s' "$VAL" \| ./manager.sh vault-add services/github/token` |
 | List vault entry NAMES (never values) | `./manager.sh vault-ls [SUBTREE]` |
 | Launch a session (creds injected) | `./manager.sh new NAME [--subtree SUB]` |
