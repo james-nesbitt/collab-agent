@@ -7,11 +7,23 @@
   `pass`-store-plus-wrappers sketch is dropped.
   - **Injection:** `manager.sh setup` keeps a no-passphrase ed25519 `pass` vault at
     `~/.omp-vault` on the VM and enables global `secrets.enabled`. `manager.sh new`
-    generates a per-session launcher that decrypts the configured subtree (default
-    `services`) and exports each entry as an env var, then `exec omp`. The entry path
-    maps to the var name (`/` and `-` → `_`, uppercased), e.g.
-    `services/github/token` → `GITHUB_TOKEN`. The launcher holds only `pass show`
-    commands — never values.
+    generates a per-session launcher that decrypts one or more subtrees (`--subtree`
+    repeats, default `services`; a later subtree wins on a name collision) and exports
+    each entry as an env var, then `exec omp`. The entry path maps to the var name (`/`
+    and `-` → `_`, uppercased), e.g. `services/github/token` → `GITHUB_TOKEN`; a
+    multi-line `key: value` entry expands to one `<ENTRY>_<KEY>` var per line, so
+    injecting the `people` subtree namespaces each operator (`people/alice/atlassian` →
+    `ALICE_ATLASSIAN_*`). The launcher holds only `pass show` commands — never values.
+  - **In-session multi-operator identity (advisory selection, not isolation):** a session
+    can inject several operators' credentials at once (inject the `people` subtree → each
+    operator namespaced as `<NS>_ATLASSIAN_*` / `<NS>_OPERATOR_*`). Because collab does not
+    expose which joined user sent a prompt (oh-my-pi#2975, open), the `mirantis-services`
+    skill resolves the acting operator from an explicit prompt cue and challenges the user
+    when it is ambiguous. This selects which credential to act with; it does **not** isolate
+    one operator's creds from another joiner — any joiner can claim any identity and every
+    injected credential is usable by anyone in the session (the same **G** boundary as
+    Tier-1). Replacing this self-reported selection with a verified identity is the
+    `operator-identity.md` TODO.
   - **Obfuscation (model):** `secrets.enabled` replaces matched env-var values with
     `#XXXX#` placeholders before outbound text reaches the model.
     `~/.omp/agent/secrets.yml` carries value-shape regex backstops for any var whose

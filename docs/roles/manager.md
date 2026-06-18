@@ -92,16 +92,27 @@ omp's `TOKEN` pattern and is auto-obfuscated. End an entry with a secret keyword
 doesn't, add a value-shape regex to `platform/secrets.yml` and re-run `setup`, or the
 value won't be obfuscated.
 
-**The `mirantis-services` skill needs two entries.** It calls JIRA and Confluence with
-one Atlassian Cloud token (one account serves both):
+**Multi-line entries.** A `pass` entry may hold several `key: value` lines, and each
+becomes its own env var named `<ENTRY>_<KEY>`. So an `atlassian` entry with `email:` and
+`token:` lines injects as `ATLASSIAN_EMAIL` and `ATLASSIAN_TOKEN`. (Detection: the entry's
+first line must be `key: value` with a space after the colon; otherwise the whole first
+line is taken as a single value — the back-compat behaviour.)
+
+**Per-operator identities in one session.** Give each operator a subtree under `people/`
+with two entries — `operator` (`name:`/`email:`, their service-independent identity) and
+`atlassian` (`email:`/`token:`, their JIRA+Confluence credential):
 
 ```bash
-printf '%s' "$ATLASSIAN_EMAIL" | ./manager.sh vault-add services/atlassian/email
-printf '%s' "$ATLASSIAN_TOKEN" | ./manager.sh vault-add services/atlassian/token
+printf 'name: Alice Example\nemail: alice@mirantis.com\n'      | ./manager.sh vault-add people/alice/operator
+printf 'email: alice@mirantis.com\ntoken: <alice-api-token>\n' | ./manager.sh vault-add people/alice/atlassian
 ```
 
-They inject as `ATLASSIAN_EMAIL` / `ATLASSIAN_TOKEN`. The `token` entry auto-obfuscates
-(name ends in `token`); `email` is not a secret.
+The `token` line auto-obfuscates (name ends in `token`); names and emails are not secret.
+Injecting the parent `people` subtree namespaces every operator's vars by their directory
+name (`ALICE_ATLASSIAN_TOKEN`, `ALICE_OPERATOR_NAME`, `BOB_…`); injecting one operator's
+subtree (`people/alice`) yields the bare `ATLASSIAN_*`/`OPERATOR_*`. The `mirantis-services`
+skill builds an operator roster from the `*_OPERATOR_NAME` vars and acts under the operator
+named in the prompt, asking if it is ambiguous.
 
 ## 3. Launch a session
 
@@ -110,8 +121,16 @@ They inject as `ATLASSIAN_EMAIL` / `ATLASSIAN_TOKEN`. The `token` entry auto-obf
 ```
 
 This creates a detached tmux session named `work` running omp, with a seeded
-`~/sessions/work/.omp/` and the whole `services` subtree injected as env vars. Want a
-different subtree? `./manager.sh new work --subtree clients/acme`.
+`~/sessions/work/.omp/` and the whole `services` subtree injected as env vars. `--subtree`
+is repeatable and the subtrees merge (a later `--subtree` wins on a name collision), so to
+run a shared multi-operator session inject the operators alongside the shared services:
+
+```bash
+./manager.sh new team  --subtree services --subtree people        # all operators, namespaced
+./manager.sh new alice --subtree services --subtree people/alice  # one operator, bare vars
+```
+
+Want a different single subtree? `./manager.sh new work --subtree clients/acme`.
 
 You'll see it confirm the session is running and remind you how to attach and share.
 

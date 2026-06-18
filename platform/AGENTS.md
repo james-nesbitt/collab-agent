@@ -16,6 +16,19 @@ joined guests can prompt and interrupt but do not execute tools independently.
 - An on-demand `credential-access` skill describes how to find and use the injected
   credentials safely.
 
+## Operator identities
+
+- A session may carry one or more **operators** — humans on whose behalf you act in external
+  services. An operator's identity is injected as `[<NS>_]OPERATOR_NAME` / `[<NS>_]OPERATOR_EMAIL`
+  (not secret) and their service credentials are namespaced the same way (e.g.
+  `<NS>_ATLASSIAN_*`). A bare `OPERATOR_*` (no prefix) means a single-operator session.
+- Before doing anything *as* a user (e.g. authoring a JIRA/Confluence change), you MUST
+  establish which operator you are acting as — see the `mirantis-services` skill's
+  "Determine the acting operator". Never silently pick one; if it is ambiguous, ask.
+- These identities are **advisory and unauthenticated**: any joined participant can claim any
+  name, and every joiner shares the screen and all injected credentials. This selects which
+  credential to act with — it is not isolation between joiners.
+
 ## Per-session skills and context
 
 - Session/folder-specific skills live in `<workdir>/.omp/skills/<name>/SKILL.md` and

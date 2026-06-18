@@ -37,8 +37,12 @@ omp join "<link>"
 
 ## Credentials, in one paragraph
 
-`manager.sh new` decrypts a `pass` vault subtree (default `services`) and injects each
-entry as an env var (`services/github/token` → `GITHUB_TOKEN`) before launching omp.
+`manager.sh new` decrypts one or more `pass` vault subtrees (default `services`; `--subtree`
+repeats, later wins) and injects each entry as an env var (`services/github/token` →
+`GITHUB_TOKEN`) before launching omp. A multi-line `key: value` entry injects as
+`<ENTRY>_<KEY>`, so injecting the `people` subtree carries several operators' identities and
+credentials namespaced per operator (`ALICE_ATLASSIAN_TOKEN`, `ALICE_OPERATOR_NAME`); the
+`mirantis-services` skill picks which operator to act as from the prompt, asking if unclear.
 Global `secrets.enabled` replaces those values with `#XXXX#` placeholders before any
 text reaches the model (**M=PASS**). Two residual exposures are documented, not closed:
 joined guests see real values on the de-obfuscated render (**G**), and a value a tool
@@ -71,6 +75,7 @@ docs/
     credential-isolation.md   #   credential design + Tier-2 roadmap
     collab-analysis.md        #   collab mechanism analysis
     local-model-acceleration.md  #   deferred GPU / heavier local-model TODO
+    operator-identity.md      #   deferred real-identity mechanism TODO
 ```
 
 ## Documentation

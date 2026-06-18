@@ -22,7 +22,7 @@ Full reference: read `docs/roles/manager.md`. Credential design and the trust bo
 | Store a credential (value on **stdin**) | `printf '%s' "$VAL" \| ./manager.sh vault-add services/github/token` |
 | List vault entry NAMES (never values) | `./manager.sh vault-ls [SUBTREE]` |
 | Tune local-model features (mnemopi memory, auto thinking) | `./manager.sh tune [--memory] [--thinking]` (no flag = both) |
-| Launch a session (creds injected) | `./manager.sh new NAME [--subtree SUB]` |
+| Launch a session (creds injected) | `./manager.sh new NAME [--subtree SUB]...` (repeatable; merge, later wins) |
 | Share + print join link | `./manager.sh collab NAME [view]` |
 | Attach / list / kill | `./manager.sh attach [NAME]` · `./manager.sh list` · `./manager.sh kill NAME` |
 
@@ -40,6 +40,12 @@ Full reference: read `docs/roles/manager.md`. Credential design and the trust bo
   `services/github/token` → `GITHUB_TOKEN`. End entries with a secret keyword
   (`token`/`key`/`secret`/`password`) so auto-obfuscation fires; otherwise add a
   value-shape regex to `platform/secrets.yml` and re-run `setup`.
+- **Per-operator identities in one session:** a multi-line `key: value` vault entry injects
+  as `<ENTRY>_<KEY>`. Give each operator `people/<op>/operator` (`name:`/`email:`) and
+  `people/<op>/atlassian` (`email:`/`token:`), then launch with `new NAME --subtree services
+  --subtree people` to inject every operator namespaced (`ALICE_ATLASSIAN_TOKEN`,
+  `ALICE_OPERATOR_NAME`, …). The `mirantis-services` skill picks the acting operator from the
+  prompt and challenges the user when it is ambiguous.
 - **Run a session for someone:** `new work` → `collab work` (copy the printed
   `omp join "<link>"` to the user) → `attach work` if you want to drive it.
 - **Add per-session skills:** drop them into `~/sessions/<name>/.omp/skills/` on the VM,
