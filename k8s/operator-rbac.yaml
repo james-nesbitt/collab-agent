@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: omp-system
+  labels:
+    app.kubernetes.io/managed-by: administrator.sh
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: omp-operator
+  namespace: omp-system
+  annotations:
+    iam.gke.io/gcp-service-account: "omp-operator@${GCP_PROJECT}.iam.gserviceaccount.com"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: omp-operator
+rules:
+  # Session CRD
+  - apiGroups: ["omp.mirantis.io"]
+    resources: ["sessions", "sessions/status"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # Namespace management
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  # Within session namespaces
+  - apiGroups: [""]
+    resources: ["pods", "pods/exec", "persistentvolumeclaims", "secrets", "configmaps", "serviceaccounts"]
+    verbs: ["create", "get", "list", "watch", "delete", "update", "patch"]
+  # NetworkPolicy
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # ExternalSecret
+  - apiGroups: ["external-secrets.io"]
+    resources: ["externalsecrets"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: omp-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: omp-operator
+subjects:
+  - kind: ServiceAccount
+    name: omp-operator
+    namespace: omp-system

@@ -1,0 +1,43 @@
+# Example: omp-config ConfigMap shape — rendered and applied by manager.sh setup
+# Do not apply this directly; use: ./manager.sh setup
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: omp-config
+  namespace: omp-system
+data:
+  config.yml: |
+    # omp platform config — managed by manager.sh setup/tune
+    secrets:
+      enabled: true
+    modelRoles:
+      default: anthropic/claude-sonnet-4-6
+      plan: anthropic/claude-opus-4-8
+      slow: anthropic/claude-haiku-4-5
+      smol: anthropic/claude-haiku-4-5
+    todo:
+      eager: always
+    search:
+      contextBefore: 1
+      contextAfter: 1
+    readLineNumbers: true
+    lsp:
+      diagnosticsOnEdit: true
+    steeringMode: all
+    checkpoint:
+      enabled: true
+    async:
+      enabled: true
+    inspect_image:
+      enabled: true
+    task:
+      isolation:
+        mode: rcopy
+        merge: patch
+        commits: ai
+      maxConcurrency: 8
+      eager: default
+    mcp:
+      discoveryMode: true
+    symbolPreset: nerd
+    hideThinkingBlock: false

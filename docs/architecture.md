@@ -1,9 +1,9 @@
-# Shared Remote Agent Machine — Architecture
+# Shared Remote Agent Machine — Architecture (GKE)
 
-A single always-on GCP VM hosts an **interactive omp agent session under tmux**. The
-session is fanned out to many user machines via **collab** over an E2E-encrypted relay.
-The **manager** drives session lifecycle and `/collab` over `gcloud ssh` (`tmux
-send-keys` / `capture-pane`); guests join the same live session from any machine.
+Each `omp` agent session runs as an **isolated pod in its own Kubernetes namespace**,
+provisioned by a custom `Session` CRD operator on a GKE Standard cluster. Sessions
+share the same relay and collab trust model as before; isolation, credentials, and
+lifecycle are fully Kubernetes-native.
 
 Sources: <https://omp.sh/docs/collab>.
 
@@ -13,14 +13,15 @@ Sources: <https://omp.sh/docs/collab>.
 
 | Goal | Mechanism |
 | --- | --- |
-| One long-lived agent session, survives laptop sleep | interactive omp under tmux on the VM |
-| Many users, many machines, live shared view + steering | collab `/collab` → `omp join` |
-| Per-session credentials, hidden from the model | vault → env injection + `secrets.enabled` |
-| Zero inbound ports on the VM | host + guests dial the relay outbound |
-| Repo, toolchain, docker/podman centralized | all tools execute host-side on the VM |
+| Per-session credential isolation (realized) | Each session namespace owns its own K8s Secret synced from GSM by ESO; no cross-namespace access |
+| Many independent, simultaneously joinable sessions | One `Session` CR per session; operator provisions a pod + link per CR |
+| Credentials hidden from the model | GSM → ESO → K8s Secret → pod env + global `secrets.enabled` obfuscation |
+| Zero inbound ports | Session pod + guests dial relay outbound only; NetworkPolicy denies all ingress |
+| Session state / OAuth tokens persist across pod restarts | PVC `omp-home` (50 Gi) per session; `$HOME` survives restart; deleted on CR delete |
+| Repo, toolchain, docker/podman centralized | All tools execute inside the session pod |
 
-Non-goals: guest-side tool execution (always host-side), relay-side plaintext (never),
-a headless programmatic-control protocol (the manager drives the interactive TUI under tmux instead).
+Non-goals: guest-side tool execution (always pod-side), relay-side plaintext (never),
+multi-tenant cluster access (single admin account).
 
 ---
 
@@ -28,9 +29,9 @@ a headless programmatic-control protocol (the manager drives the interactive TUI
 
 | Role | Surface | Owns |
 | --- | --- | --- |
-| **Administrator** | `administrator.sh` | GCP/VM lifecycle: provision, start/stop, bootstrap (OS packages + mise/bun/omp), ssh, destroy. |
-| **Manager** | `manager.sh` | VM-wide omp platform config (global `secrets.enabled`, global `RULES.md`/`AGENTS.md` + behaviour/safety `rules/` + the `commit-push-pr` command + `secrets.yml` + the `credential-access`/`mirantis-services` skills, portable `omp config set` tuning incl. `modelRoles`, the `pass` vault; opt-in mnemopi memory + auto thinking via `manager.sh tune`) **and** per-session lifecycle (create with seeded `.omp/` + injected creds, attach/list/kill, share collab link). |
-| **Operator / joiner** | *(no script)* | Interacts only by `omp join`-ing the shared session. Behaviour is governed by the global `RULES.md`/`AGENTS.md` and skills the manager installs. |
+| **Administrator** | `administrator.sh` | GKE cluster lifecycle: provision (cluster + IAM + GCP SAs), bootstrap (ESO, CRD, operator), credentials, status, destroy. Pure infra — no omp config, no sessions. |
+| **Manager** | `manager.sh` | GSM vault (`vault-add` / `vault-ls`), omp platform config (ConfigMap `omp-config` in `omp-system`), portable tuning incl. `modelRoles`, opt-in memory + thinking via `tune`; per-session lifecycle (`new` / `login` / `attach` / `list` / `kill` / `collab`) via `Session` CRs. |
+| **Operator / joiner** | *(no script)* | Interacts only by `omp join`-ing the shared session. Behaviour governed by `RULES.md`/`AGENTS.md` and skills baked into the image. |
 
 ---
 
@@ -38,33 +39,44 @@ a headless programmatic-control protocol (the manager drives the interactive TUI
 
 ```mermaid
 graph TB
-  subgraph VM["GCP VM (omp-agent, always-on)"]
-    TM["tmux"]
-    OMP["omp (interactive TUI,<br/>AgentSession)"]
-    TOOLS["tools: bash, edit,<br/>lsp, docker, podman"]
-    VAULT["pass vault<br/>(~/.omp-vault)"]
-    TM --> OMP --> TOOLS
-    VAULT -. "env injection<br/>at launch" .-> OMP
+  subgraph LAP["administrator / manager @ laptop"]
+    ADM["administrator.sh\n(gcloud container + kubectl)"]
+    MGR["manager.sh\n(kubectl + gcloud secrets)"]
   end
-  RELAY["relay<br/>wss://my.omp.sh<br/>(or self-hosted)"]
-  subgraph U1["laptop A"]
-    J1["omp join"]
+  GSM["GCP Secret Manager\n(the vault)"]
+  subgraph GKE["GKE Standard cluster — omp-cluster\n3× Ubuntu e2-standard-4, europe-west1-b\nDataplane V2 + Workload Identity"]
+    subgraph SYS["ns omp-system"]
+      OP["Session operator (kopf)\nWI: omp-operator (secretmanager.viewer)"]
+      CFG["ConfigMap omp-config"]
+    end
+    subgraph ESONS["ns external-secrets"]
+      ESO["External Secrets Operator\nWI: omp-eso (secretAccessor)"]
+    end
+    subgraph SESS["ns omp-session-{name}  (one per Session CR)"]
+      ES["ExternalSecret omp-creds"] --> SEC["Secret omp-creds"]
+      PVC["PVC omp-home (50 Gi)"]
+      NP["NetworkPolicy: deny-all + DNS + 443-egress"]
+      POD["Pod omp\ntmux + omp\nrootless docker + podman\nuid 1000, non-privileged\nenvFrom omp-creds"]
+      SEC --> POD
+      PVC --> POD
+    end
   end
-  subgraph U2["machine B"]
-    J2["omp join"]
-  end
-  subgraph U3["any browser"]
-    WB["web client<br/>(served by relay /)"]
-  end
-  OMP -. "collab module<br/>(outbound wss)" .-> RELAY
-  RELAY <--> J1
-  RELAY <--> J2
-  RELAY <--> WB
-  MGR["manager @ laptop"] -->|"gcloud ssh + IAP<br/>tmux send-keys / capture-pane"| TM
+  RELAY["relay wss://my.omp.sh"]
+  MGR -->|kubectl apply Session CR| OP
+  OP -->|creates ns/PVC/ES/NP/Pod| SESS
+  OP -->|"exec /collab → status.joinLink"| POD
+  ESO -->|read values| GSM
+  ESO --> ES
+  MGR -->|gcloud secrets| GSM
+  POD -. "collab (outbound wss 443)" .-> RELAY
+  CI["GitHub Actions\nbuild-images.yml"] -->|build + push| GHCR["ghcr.io\nomp-session / omp-operator"]
+  GHCR -. "image pull" .-> POD
+  GHCR -. "image pull" .-> OP
 ```
 
-Key property: the VM and every guest **dial out** to the relay. No inbound firewall
-rule on the VM is required for sharing; manager control rides IAP.
+Key property: the session pod and every guest **dial out** to the relay. No inbound
+firewall rule or inbound NetworkPolicy rule is needed. Manager control rides
+`kubectl exec` over the K8s API — no IAP/SSH.
 
 ---
 
@@ -72,51 +84,60 @@ rule on the VM is required for sharing; manager control rides IAP.
 
 | Component | Role | Transport |
 | --- | --- | --- |
-| `omp` (interactive) | The agent host. Owns the single `AgentSession`; runs all tools. | TUI inside tmux |
-| tmux | Keeps the session alive across SSH disconnects; the manager drives it via `send-keys`/`capture-pane`. | — |
-| `pass` vault | At-rest, GPG-encrypted credential store on the VM. A per-session launcher decrypts the configured subtree and exports it as env vars before `exec omp`. | local fs |
-| collab module (in-process) | Seals session frames (AES-256-GCM), multiplexes guests, dials the relay. | outbound wss |
-| relay | Blind rendezvous. Routes opaque ciphertext between host and guests; serves the browser client at `/`. | wss |
-| `omp join` / web client | Guests. Render the session natively; prompt/interrupt if write-capable. | wss to relay |
-| manager SSH | Out-of-band lifecycle + `/collab` driving (`gcloud ssh` + IAP). | ssh via IAP |
+| `Session` CRD (`omp.mirantis.io/v1alpha1`) | Declarative session descriptor; one CR per session. Status carries `phase`, `namespace`, `podName`, `joinLink`, `viewLink`. | etcd / K8s API |
+| Session operator (kopf/Python) | Reconciles `Session` CRs: creates namespace, PVC, ExternalSecret, NetworkPolicy, Pod; captures collab link via `pods/exec`; GCs namespace on CR delete. | in-cluster API + pod exec |
+| External Secrets Operator (ESO) | Syncs GSM secret values into per-namespace K8s Secrets via `ClusterSecretStore omp-gsm` (Workload Identity). Refreshes hourly. | GSM API → K8s Secret API |
+| GCP Secret Manager | At-rest credential store. Entries labelled `omp_vault=true`, `omp_subtree=<subtree>`. ESO's WI SA is the only accessor. | HTTPS |
+| PVC `omp-home` (50 Gi, `standard-rwo`) | Persists `$HOME`: omp OAuth tokens, `~/work`, session transcripts. Survives pod restarts; deleted when the Session CR is deleted. | GKE Persistent Disk |
+| `omp` pod | The agent host. Runs omp under tmux; rootless dockerd + podman (vfs driver, uid 1000, non-privileged). Platform assets baked at `/opt/omp/agent/`; seeded to `$HOME` each boot by the entrypoint. | — |
+| ConfigMap `omp-config` | Master omp `config.yml` in `omp-system`; mounted read-only at `/etc/omp/config.yml` in every session pod. Updated by `manager.sh setup` / `tune`. | K8s volume mount |
+| collab module (in-process) | Seals session frames (AES-256-GCM), multiplexes guests, dials the relay. Identical to prior design. | outbound wss |
+| relay | Blind rendezvous. Routes opaque ciphertext; serves browser client at `/`. | wss |
+| `omp join` / web client | Guests. Render session natively; prompt/interrupt if write-capable. | wss to relay |
+| GHCR images | `omp-session` + `omp-operator` published by `build-images.yml` on every relevant push. Source of truth for platform assets and operator code. | HTTPS pull |
 
 ---
 
 ## 5. Credentials
 
-Design (selected POC, "Approach A"): **env injection from a `pass` vault + global
-`secrets.enabled` obfuscation.**
+Design: **GSM → ESO → per-namespace K8s Secret → pod `envFrom`** + global
+`secrets.enabled` obfuscation.
 
-- The manager keeps a no-passphrase ed25519 `pass` vault at `~/.omp-vault` on the VM.
-  Entries live under a subtree (default `services`), e.g. `services/github/token`.
-- `manager.sh new` generates a per-session launcher that decrypts the whole subtree
-  and exports each entry as an env var, then `exec omp`. The entry path maps to the
-  var name (`/` and `-` → `_`, uppercased), so `services/github/token` → `GITHUB_TOKEN`
-  — which matches omp's `TOKEN` secret-name pattern. The launcher contains only
-  `pass show` commands, never values.
-- Global `secrets.enabled: true` replaces matched env-var values with `#XXXX#`
-  placeholders before any outbound text reaches the model. `~/.omp/agent/secrets.yml`
-  holds value-shape regex backstops for vars whose name lacks a secret keyword.
+- The manager stores credentials in GCP Secret Manager. Each entry is labelled
+  `omp_vault=true` and `omp_subtree=<subtree>` (`/` → `-` for label safety).
+- At session creation the operator builds an `ExternalSecret` in the session namespace
+  listing all secrets whose `omp_subtree` label matches a requested subtree. ESO
+  (Workload Identity SA `omp-eso`, `secretmanager.secretAccessor`) syncs them into
+  K8s Secret `omp-creds` in that namespace. Refresh interval: 1 h.
+- The entry path maps to the env var name: strip the subtree prefix, replace `/`
+  and `-` with `_`, uppercase. Example: `services-github-token` (subtree `services`)
+  → `GITHUB_TOKEN`. This matches the existing transform from `manager.sh`.
+- The session pod's `envFrom` references `omp-creds`. The operator SA
+  (`omp-operator`, `secretmanager.viewer`) only reads metadata — never values.
+- Global `secrets.enabled: true` (in the master ConfigMap) replaces matched env-var
+  values with `#XXXX#` before any text reaches the model. `secrets.yml` carries
+  value-shape regex backstops.
 
-POC findings (verbatim — these define the trust boundary):
+Trust boundary update (resolves the `planning/credential-isolation.md` Tier-2 gap):
 
-- **M = PASS** — the model only ever receives the `#XXXX#` placeholder, never the real
-  value.
-- **G = guest EXPOSED** — a joined guest sees the real value on the final
-  de-obfuscated render and in any tool card. **Joiners are inside the credential trust
-  boundary.** Hiding credentials from guests requires Tier-2 OS isolation (see
-  [`planning/credential-isolation.md`](planning/credential-isolation.md)).
-- **R = conditional FAIL** — omp persists `toolResult` blocks de-obfuscated into the
-  session `.jsonl`, so a secret leaks to disk **only if a tool prints it**. Operational
-  rule (enforced by `RULES.md`): never echo/print/log a credential; consume it inline.
+- **M = PASS** — model receives `#XXXX#` only. Unchanged.
+- **G = NAMESPACE** — Tier-2 credential isolation is **realized**: each session's
+  secrets live exclusively in its own namespace's K8s Secret. A guest holding session
+  A's collab link cannot reach session B's `Secret` or its pod env; NetworkPolicy
+  blocks pod-to-pod lateral movement between session namespaces.
+- **R = conditional FAIL** — `toolResult` blocks are persisted de-obfuscated into
+  `~/work` (on the PVC). The `RULES.md` operational rule stands: never echo/print/log
+  a credential; consume inline.
 
-The no-passphrase vault is the documented **Tier-1** boundary: any in-session
-participant can decrypt. Tier-2 (per-session OS isolation) is the fix and is tracked,
-not built.
+The GPG/`pass` vault is fully removed. No passphrase prompt. At-rest encryption is
+provided by GCP Secret Manager + IAM; in-transit by ESO's WI-authenticated HTTPS and
+by GKE's etcd encryption-at-rest.
 
 ---
 
 ## 6. Guest join + prompt round trip
+
+*(Collab protocol unchanged.)*
 
 ```mermaid
 sequenceDiagram
@@ -150,39 +171,45 @@ graph TD
   F -- "48-byte full link" --> FULL["full guest"]
   F -- "32-byte key only" --> VIEW["view-only guest"]
 
-  FULL --> CAN["prompt · interrupt · subagent hub<br/>read full back-transcript"]
+  FULL --> CAN["prompt · interrupt · subagent hub\nread full back-transcript"]
   VIEW --> RO["read live + back-transcript only"]
 
-  HOSTONLY["host-only (never delegated):<br/>/model · /compact · /resume · /branch<br/>bash ! · python $ · skills"]
+  HOSTONLY["host-only (never delegated):\n/model · /compact · /resume · /branch\nbash ! · python $ · skills"]
 
   classDef ho fill:#3a1b1b,stroke:#d65b5b,color:#ffe0e0;
   class HOSTONLY ho;
 ```
 
-Enforcement is by the link itself: the host verifies the write token at join and
-rejects writes from tokenless peers (they show read-only in the participants list).
-Guests keep a small local allowlist (`/dump`, `/export`, `/copy`, `/help`, `/hotkeys`,
-`/theme`, `/settings`, `/leave`, `/collab`, `/exit`).
+Enforcement is by the link itself (host verifies write token at join). Guests keep a
+small local allowlist (`/dump`, `/export`, `/copy`, `/help`, `/hotkeys`, `/theme`,
+`/settings`, `/leave`, `/collab`, `/exit`).
+
+Namespace-level enforcement (new): the session pod runs as uid 1000 with no cluster
+permissions. Even a shell-escape inside the pod cannot reach sibling namespaces — the
+session ServiceAccount holds no cross-namespace RBAC; NetworkPolicy blocks
+pod-to-pod traffic between session namespaces.
 
 ---
 
 ## 8. Encryption & what the relay sees
 
+*(Identical to prior design.)*
+
 ```mermaid
 graph LR
-  PT["session payload<br/>(entries, events, state, prompts)"] -->|"AES-256-GCM seal"| CT["ciphertext frame"]
+  PT["session payload\n(entries, events, state, prompts)"] -->|"AES-256-GCM seal"| CT["ciphertext frame"]
   CT --> RELAY["relay"]
   RELAY --> CT2["ciphertext frame"]
   CT2 -->|"open"| PT2["payload (guest)"]
 
-  RELAY -.sees only.-> META["room id · connection count<br/>frame sizes · 4-byte routing prefix"]
+  RELAY -.sees only.-> META["room id · connection count\nframe sizes · 4-byte routing prefix"]
   classDef m fill:#222,stroke:#888,color:#ccc;
   class META m;
 ```
 
 The key lives in the URL fragment (`#<key>`), never sent in any HTTP request, never
-reaching the relay. Possession of the link is the entire trust boundary — treat full
-and view-only links as secrets.
+reaching the relay. Link possession is the entire trust boundary — treat full and
+view-only links as secrets.
 
 ---
 
@@ -190,13 +217,24 @@ and view-only links as secrets.
 
 | Path | Direction | Port/Proto | Auth |
 | --- | --- | --- | --- |
-| manager → VM (control) | outbound from laptop | 443 → IAP → 22 | Google IAM (OS Login + `iap.tunnelResourceAccessor`) |
-| VM host → relay (data) | outbound from VM | 443 wss | room key (E2E); relay blind |
-| guest → relay (data) | outbound from guest | 443 wss | link (key ± write token) |
-| browser → relay (client) | outbound | 443 https + wss | link in fragment |
+| manager → K8s API | outbound from laptop | 443 HTTPS | Google IAM (`roles/container.admin`) |
+| manager → GSM | outbound from laptop | 443 HTTPS | Google IAM (admin account) |
+| session pod → relay | outbound from pod | 443 wss | room key (E2E); relay blind |
+| guest → relay | outbound from guest | 443 wss | link (key ± write token) |
+| browser → relay | outbound | 443 https + wss | link in fragment |
+| ESO → GSM | outbound from cluster | 443 HTTPS | Workload Identity (`omp-eso`, `secretAccessor`) |
+| operator → K8s API | in-cluster | 443 HTTPS | ServiceAccount RBAC (`omp-operator` ClusterRole) |
+| operator → pod exec | in-cluster | via K8s API (`pods/exec`) | ServiceAccount RBAC |
 
-No inbound ports open on the VM for collab. The legacy 7077 firewall rule from the
-earlier container design is unused and removed on `administrator.sh destroy`.
+NetworkPolicy per session namespace: **deny-all ingress; deny-all egress except**
+UDP/TCP 53 to `kube-system` (DNS) and TCP 443 to `0.0.0.0/0` **excluding**
+`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.169.254/32`.
+The exclusions block RFC1918 lateral movement to other session namespaces and,
+critically, the GCE metadata server — a compromised pod cannot mint Workload Identity
+tokens or reach GSM directly. The operator's `pods/exec` rides the API server, not
+pod networking, so it is unaffected by the policy.
+
+No inbound ports on any session pod. No IAP/SSH path.
 
 ---
 
@@ -204,21 +242,26 @@ earlier container design is unused and removed on `administrator.sh destroy`.
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Launching: manager.sh new (launcher injects creds → exec omp)
-  Launching --> Idle: omp composer ready
-  Idle --> Hosting: manager.sh collab → /collab → link
-  Hosting --> Hosting: guests join / leave / prompt
-  Hosting --> Idle: "/collab stop"
-  Idle --> [*]: manager.sh kill
+  [*] --> Pending: kubectl apply Session CR\n(manager.sh new)
+  Pending --> Provisioning: operator reconciles CR
+  Provisioning --> Running: ns/PVC/ES/NP/Pod created; pod Ready
+  Running --> Hosting: /collab exec succeeds; joinLink written to status
+  Hosting --> Hosting: guests join/leave/prompt
+  Hosting --> Running: pod restarts; link recapture pending
+  Running --> Terminating: kubectl delete Session CR\n(manager.sh kill)
+  Hosting --> Terminating: kubectl delete Session CR\n(manager.sh kill)
+  Terminating --> [*]: namespace GC cascades PVC + Secret + ExternalSecret + NetworkPolicy + Pod
   note right of Hosting
-    relay room persists only while
-    the omp process holds it; link is
-    re-minted on relaunch
+    status.joinLink updated after each pod restart;
+    prior guests must rejoin with the new link
   end note
 ```
 
-A relaunch mints a new room/link (re-shared via `manager.sh collab`). Guests reconnect
-with the new link; their prior local session is restored on `/leave`.
+A pod restart (crash / OOM / manual delete) keeps the Session CR alive. The operator
+re-captures the collab link from the restarted pod and updates `status.joinLink`;
+phase drops to `Running` during recapture and returns to `Hosting` once the link is
+refreshed. The PVC persists `$HOME` (auth tokens, `~/work`) across restarts.
+Deleting the CR (`manager.sh kill`) fully reclaims all resources including the disk.
 
 ---
 
@@ -227,10 +270,13 @@ with the new link; their prior local session is restored on `/leave`.
 | Failure | Detection | Recovery |
 | --- | --- | --- |
 | relay unreachable | collab connect error event | retry with backoff; link stable across retries |
-| VM stop/restart | tmux gone | `administrator.sh start` → `manager.sh new` |
-| guest write without token | host token verify fails | guest downgraded to read-only |
-| turn streaming at guest join | v1 limit | guest sees it from next message boundary |
-| credential printed by a tool | value lands in `.jsonl` / on guest screens | `RULES.md` forbids printing; rotate the leaked entry |
+| pod crash / OOM | K8s `restartPolicy: Always` | automatic restart; operator re-captures collab link; guests rejoin with new link |
+| operator crash | K8s Deployment restarts it | on resume, kopf `@kopf.on.resume` re-reconciles all existing Session CRs |
+| ESO sync failure | `ExternalSecret` status `SecretSyncError` | ESO retries; check GSM IAM or secret existence; `kubectl get externalsecret omp-creds -n omp-session-<name>` |
+| stale collab link after pod restart | `status.phase` = `Running` during recapture | `manager.sh collab <name>` triggers re-capture annotation; wait for `Hosting` |
+| guest write without token | host token verify fails | guest downgraded to read-only; no server-side change needed |
+| credential printed by a tool | value lands in `~/work/*.jsonl` and on guest screens | `RULES.md` forbids printing; rotate the leaked entry in GSM |
+| node failure | GKE node controller evicts pod; rescheduled | PVC re-attaches on new node within the same zone (zonal `standard-rwo` disk) |
 
 ---
 
@@ -238,27 +284,52 @@ with the new link; their prior local session is restored on `/leave`.
 
 | Command | Action |
 | --- | --- |
-| `administrator.sh start` | start the VM |
-| `manager.sh setup` | enable `secrets.enabled`, ensure the vault, install global assets (rules, command, skills, secret patterns), apply portable tuning + `modelRoles` |
-| `manager.sh tune [--memory] [--thinking]` | apply opt-in local-model tuning (mnemopi memory / auto thinking; local ONNX, no Ollama) |
-| `manager.sh vault-add ENTRY` | insert a credential (value on stdin, never echoed) |
-| `manager.sh new NAME [--subtree SUB]` | launch a session with seeded `.omp/` + injected creds |
-| `manager.sh collab [NAME] [view]` | print the current join link (re-share if needed) |
-| `manager.sh attach [NAME]` | attach to a session (most recent if NAME omitted) |
+| `administrator.sh provision` | create GKE cluster, GCP SAs (`omp-eso`, `omp-operator`), IAM bindings, enable APIs |
+| `administrator.sh bootstrap` | install ESO via Helm, apply `k8s/crd-session.yaml` + RBAC + operator Deployment, wait for Available |
+| `administrator.sh credentials` | `gcloud container clusters get-credentials` (thin convenience) |
+| `administrator.sh status` | cluster describe + `kubectl get nodes` + `kubectl get sessions -A` |
+| `administrator.sh destroy` | delete cluster, GCP SAs, IAM bindings |
+| `manager.sh setup` | apply `ClusterSecretStore omp-gsm`, create/patch master ConfigMap `omp-config` in `omp-system` |
+| `manager.sh tune [--memory] [--thinking]` | patch `omp-config` ConfigMap with mnemopi / auto-thinking keys; running pods pick up on next restart |
+| `manager.sh vault-add ENTRY` | insert credential into GSM (value on stdin, never echoed) |
+| `manager.sh vault-ls [SUBTREE]` | list GSM secret names for the vault (names only, never values) |
+| `manager.sh new NAME [--subtree SUB]…` | create Session CR; wait for `status.phase=Hosting` |
+| `manager.sh login NAME` | `kubectl exec -it` into pod for in-session OAuth (`omp auth login`); token persists on PVC |
+| `manager.sh collab [NAME] [view]` | print current `status.joinLink` (or `status.viewLink`); triggers re-capture if stale |
+| `manager.sh attach [NAME]` | `kubectl exec -it … tmux attach -t omp` (most-recent session if NAME omitted) |
+| `manager.sh list` | `kubectl get sessions -n omp-system` |
+| `manager.sh kill NAME` | `kubectl delete session NAME -n omp-system` → GC namespace + PVC |
 | `omp join "<link>"` | from any user machine |
 
 ---
 
 ## 13. Why this shape
 
-- **Interactive omp under tmux, driven by the manager**: the session outlives any
-  terminal and survives laptop sleep; the manager steers lifecycle and `/collab`
-  out-of-band over IAP without a human pinned to the TUI.
+- **Per-session namespace isolation**: Tier-2 OS isolation is now realized via GKE
+  namespaces — each session's credentials live exclusively in its own namespace's
+  K8s Secret (ESO-synced from GSM), its pod runs as uid 1000 with no cross-namespace
+  RBAC, and a deny-all NetworkPolicy blocks lateral movement. G exposure (guests see
+  real values in their own collab session) remains bounded by link possession, but
+  cross-session credential leakage is eliminated.
+- **Session operator + CRD over SSH scripting**: the manager applies a CR and walks
+  away; the operator reconciles asynchronously, captures the link, and writes
+  structured status back. No long-lived SSH connection, no race between launcher and
+  tmux, no shared OS user.
+- **GSM + ESO over pass/GPG**: a managed, IAM-governed secret store with no GPG key
+  management, no per-session launcher generation, and a clean audit trail. ESO syncs
+  values into scoped K8s Secrets rather than decrypting into a shared process
+  environment.
+- **PVC per session**: OAuth tokens and workspace state persist across pod restarts
+  without manual re-auth; disk lifecycle is tied to the Session CR, so `kill` is a
+  clean teardown with no orphaned data.
 - **collab for users, not SSH-shared tmux**: guests get a native rendered session
-  (tool cards, subagent hub, footer state) and per-link permissions, not a raw mirrored
-  terminal; works from a browser with nothing installed.
-- **relay dial-out both sides**: no inbound exposure on the VM; the relay is a blind
-  ciphertext router, so the trust boundary collapses to link possession.
-- **vault + obfuscation for credentials**: secrets stay off the model (M=PASS) and at
-  rest in GPG ciphertext; the residual exposure to in-session guests (G) and to a
-  printing tool (R) is documented and bounded by `RULES.md` + the Tier-2 roadmap.
+  (tool cards, subagent hub, footer state) and per-link permissions, not a raw
+  mirrored terminal; works from a browser with nothing installed. Unchanged from the
+  prior design.
+- **Relay dial-out from pod**: NetworkPolicy allows only outbound 443 (non-RFC1918,
+  non-metadata) — no inbound exposure; relay is a blind ciphertext router; trust
+  boundary collapses to link possession.
+- **GHCR images + CI**: platform assets (rules, commands, skills, config defaults) are
+  baked into the image and updated by pushing a branch — no SSH file-upload, no
+  per-VM bootstrap script. The cluster is fully reproducible from `provision` +
+  `bootstrap`.

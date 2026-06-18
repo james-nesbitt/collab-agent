@@ -45,30 +45,22 @@
 2. The session-transcript directory needs at-rest protection or redaction, since
    `toolResult` blocks are persisted de-obfuscated.
 
-## Tier 2 — per-session OS-level isolation (NOT YET DONE)
+## Tier 2 — per-session isolation (REALIZED via GKE namespaces)
 
-Goal: real isolation so a session's guests are confined to that session's credential
-identity, and one session cannot read another's secrets. Justified directly by the
-**G** result (guests currently see real values) and the **R** caveat (transcript leaks
-when a tool prints a value); both are confidentiality gaps Tier 1 cannot close.
+Goal achieved via the GKE migration (see `docs/planning/gke-migration.md`):
 
-Design sketch:
-- Each collab session runs `omp` as its **own Linux user** (or container / user
-  namespace) with its own `$HOME`, vault, and GPG key.
-- Cross-session isolation enforced by filesystem permissions / namespaces — a guest's
-  `cat`/`gpg -d` cannot reach a sibling session's store.
-- Requires a **privileged provisioner** (runs as root or via sudo) that, at session
-  creation: creates/min-provisions the user (or spins a container), seeds only the
-  needed credential subset into that user's store, and launches `omp` as that user
-  inside tmux.
-- `manager.sh new NAME` grows an `--as-user` / `--isolated` mode that calls the
-  provisioner instead of launching in the shared home.
-- Open questions to resolve in the Tier 2 POC:
-  - User-per-session vs container-per-session (cleanup, image size, GPU/tooling).
-  - How the operator seeds the per-user GPG key without exposing it to the shared host
-    (sealed transfer, or per-user key generated in-place).
-  - Lifecycle: teardown of the user/container + store when the session ends.
-  - Whether to gate the model credential the same way (per-user `omp auth`).
+- Each session runs in its own Kubernetes **namespace** (`omp-session-{name}`) with
+  its own ServiceAccount, PVC, and K8s Secret — enforced by the API server.
+- Credentials are scoped: only the subtrees requested at `manager.sh new` are synced
+  into that session's ExternalSecret/Secret. The operator calls `list_secrets` only
+  (metadata); ESO holds the `secretAccessor` role and never exposes values to the
+  operator process.
+- **NetworkPolicy** `deny-all` + `allow-egress-https` (except RFC1918 and
+  `169.254.169.254/32`) enforces that a pod cannot reach sibling session namespaces or
+  the GCE metadata server.
+- The remaining gap: **joined guests still see all of that session's injected creds**
+  on the collab render (G = guest EXPOSED is unchanged). Per-joiner hiding within a
+  shared session would require a second relay tier or client-side filtering — not built.
 
 ## Related POCs already done
 

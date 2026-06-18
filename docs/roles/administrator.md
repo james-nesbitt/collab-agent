@@ -1,56 +1,79 @@
 # Administrator Guide
 
-You are the **administrator**. Your job is to stand up and maintain the GCP VM that
-everything else runs on — nothing more. Once the box exists and has the `omp` runtime
-installed, you hand off to the [manager](manager.md), who owns omp itself.
+You are the **administrator**. Your job is to stand up and maintain the GKE cluster that
+everything else runs on — nothing more. Once the cluster exists and the platform runtime
+(ESO, CRD, operator) is installed, you hand off to the [manager](manager.md), who owns
+omp configuration, the GSM vault, and session lifecycle.
 
 Everything you do goes through **`administrator.sh`**, run from this repo on your
-laptop. All access tunnels over `gcloud ssh` + IAP, so you never open inbound ports.
+laptop. There is no VM, no static IP, and no SSH. All cluster access is via
+`kubectl` (credentials fetched from GKE) and `gcloud`.
 
 ## Before you start
 
-- `gcloud` installed and logged in (`gcloud auth login`).
-- IAM on the project: OS Login and `roles/iap.tunnelResourceAccessor` (so IAP SSH
-  works).
-- The defaults target project `tools-348616`, instance `omp-agent`, zone
-  `europe-west1-b`. To point elsewhere, export `INSTANCE_NAME`, `ZONE`, `REGION`, etc.
+- `gcloud` installed and authenticated: `gcloud auth login`.
+- `kubectl` installed.
+- `helm` installed (v3+).
+- Your active GCP account must be the one that will own the cluster
+  (`gcloud config get-value account`). The script locks IAM access to this account and
+  stores it as `ADMIN_GCP_ACCOUNT` (defaults to the currently active account).
+- The defaults target project `tools-348616`, zone `europe-west1-b`. Override via env
   before running (see the end of this guide).
 
-## 1. First time: create the VM
+## 1. First time: create the cluster + IAM
 
 ```bash
 ./administrator.sh provision
 ```
 
-This reserves a static external IP and creates the instance. It is idempotent — if the
-IP or VM already exist it skips them. When it finishes you'll see the instance name,
-zone, and static IP, plus the next steps.
+This is idempotent — re-running is safe if anything was already created.
 
-## 2. First time: install the runtime
+What it does:
+
+- Enables GCP APIs (`container.googleapis.com`, `secretmanager.googleapis.com`).
+- Creates the GKE Standard cluster `omp-cluster` (3 × `e2-standard-4` Ubuntu nodes,
+  Dataplane V2, Workload Identity).
+- Creates two GCP service accounts:
+  - `omp-eso` — ESO reads credential values from GSM (`roles/secretmanager.secretAccessor`).
+  - `omp-operator` — operator lists secret metadata in GSM (`roles/secretmanager.viewer`).
+- Adds Workload Identity bindings so the GKE pods impersonate those GCP SAs without
+  any key file.
+- Grants `roles/container.admin` to `ADMIN_GCP_ACCOUNT` only; refuses to proceed if
+  `allUsers` or `allAuthenticatedUsers` bindings are found on the project.
+
+When it finishes, run `bootstrap` next.
+
+## 2. First time: install the platform runtime
 
 ```bash
 ./administrator.sh bootstrap
 ```
 
-This installs system tmux and the rootless-container deps, then mise/bun/omp into your
-OS-Login user's home. Run it **once per OS-Login user**; it's idempotent, so re-running
-is safe. At the end it prints the installed tool versions — confirm `omp --version`
-shows up.
+This installs the cluster-side platform components. Run once; idempotent.
+
+What it does:
+
+- Fetches cluster credentials (`gcloud container clusters get-credentials`).
+- Binds `ADMIN_GCP_ACCOUNT` to RBAC `cluster-admin`.
+- Installs External Secrets Operator (ESO) via Helm into `external-secrets`,
+  annotating its service account with the `omp-eso` GCP SA for Workload Identity.
+- Applies `k8s/crd-session.yaml`, `k8s/operator-rbac.yaml`, `k8s/operator-deploy.yaml`
+  (env-substituting `GCP_PROJECT`, `OMP_REGISTRY`, `OMP_IMAGE_TAG` first).
+- Waits for the `omp-operator` Deployment (ns `omp-system`) and ESO to become Available.
+- Prints `BOOTSTRAP_OK`.
 
 Now hand off: the manager runs `./manager.sh setup` (see the [manager guide](manager.md)).
 
 ## 3. Day to day
 
-- **Save money when idle.** The disk persists across stops, so stop the VM overnight or
-  on weekends and start it again when needed:
-  ```bash
-  ./administrator.sh stop
-  ./administrator.sh start
-  ```
-- **Check on it.** `./administrator.sh status` shows the run state and IP;
-  `./administrator.sh ip` prints just the static IP.
-- **Get a shell.** `./administrator.sh ssh` drops you onto the VM; append
-  `-- <args>` to pass extra flags to `gcloud compute ssh`.
+- **Check on it.** `./administrator.sh status` prints a cluster summary, node list, and
+  all current Sessions cluster-wide.
+- **Refresh kubectl credentials.** `./administrator.sh credentials` runs the
+  `get-credentials` call — useful when your kubeconfig has expired.
+- **Images.** Session and operator images are built and published to GHCR by the CI
+  workflow (`.github/workflows/build-images.yml`); `administrator.sh` does not build or
+  push images. Set GHCR packages to **public** after the first CI push so GKE pulls
+  anonymously without an imagePullSecret (GitHub → repo → Packages → package settings).
 
 ## 4. Tearing it down
 
@@ -58,30 +81,34 @@ Now hand off: the manager runs `./manager.sh setup` (see the [manager guide](man
 ./administrator.sh destroy
 ```
 
-This permanently deletes the instance and releases the static IP (and cleans the legacy
-firewall rule if present). It asks you to type `yes` first. **The disk goes with it** —
-back up anything you need first.
+This permanently deletes the cluster, the two GCP service accounts (`omp-eso`,
+`omp-operator`), and their IAM bindings. It prompts you to type `yes` first.
 
-## Pointing at a different VM
+**All session namespaces, PVCs, and the GSM vault contents are deleted with the
+cluster.** Back up anything you need first.
+
+## Pointing at a different cluster
 
 Every default is overridable by environment variable for a single command:
 
 ```bash
-INSTANCE_NAME=omp-staging ZONE=us-central1-a ./administrator.sh provision
+CLUSTER_NAME=omp-staging ZONE=us-central1-a ./administrator.sh provision
 ```
 
 | Variable | Default | When it matters |
 | --- | --- | --- |
-| `INSTANCE_NAME` | `omp-agent` | always |
+| `GCP_PROJECT` | `tools-348616` | always |
 | `ZONE` / `REGION` | `europe-west1-b` / `europe-west1` | always |
-| `MACHINE_TYPE`, `DISK_SIZE`, `DISK_TYPE` | `e2-standard-4`, `200GB`, `pd-balanced` | `provision` only |
-| `STATIC_IP_NAME` | `omp-server-ip` | always |
-| `USE_IAP` | `true` | set `false` only if you have a public-SSH setup |
+| `CLUSTER_NAME` | `omp-cluster` | always |
+| `NODE_MACHINE_TYPE` | `e2-standard-4` | `provision` only |
+| `ADMIN_GCP_ACCOUNT` | active gcloud account | `provision`, `bootstrap` |
+| `OMP_REGISTRY` | `ghcr.io/james-nesbitt/collab-agent` | `bootstrap` |
+| `OMP_IMAGE_TAG` | `latest` | `bootstrap` |
 
 ## What you don't do
 
-You never configure omp, touch credentials, or create sessions. The moment the runtime
-is installed, that's the [manager's](manager.md) job. If something's wrong with a
-*session* (not the VM), it's a manager problem. For the bigger picture — why there are
-no inbound ports, how collab and credentials work — read
-[the architecture doc](../architecture.md).
+You never configure omp, touch GSM secrets, or create sessions. The moment
+`BOOTSTRAP_OK` prints, that's the [manager's](manager.md) job. If something's wrong with
+a *session* (not the cluster or operator), it's a manager problem. For the bigger picture
+— how ESO syncs credentials into session namespaces, how NetworkPolicy isolates sessions,
+how the collab link is captured — read [the architecture doc](../architecture.md).
