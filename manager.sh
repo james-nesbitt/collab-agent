@@ -22,9 +22,14 @@
 #                            No flag applies both.
 #
 # Session lifecycle:
-#   new NAME [--subtree SUB] Create a detached tmux session running omp, with a
-#                            seeded per-folder .omp/ and the vault SUBTREE
-#                            (default: services) injected as env vars.
+#   new NAME [--subtree SUB]...
+#                            Create a detached tmux session running omp, with a
+#                            seeded per-folder .omp/ and one or more vault subtrees
+#                            (default: services) injected as env vars. --subtree is
+#                            repeatable; subtrees merge, later wins. A multi-line
+#                            'key: value' entry injects as <ENTRY>_<KEY>; injecting
+#                            'people' gives per-operator namespaced vars (e.g.
+#                            ALICE_ATLASSIAN_TOKEN, ALICE_OPERATOR_NAME).
 #   attach [NAME] | a        Attach to a session (most recent if NAME omitted).
 #   list | ls                List tmux sessions on the VM.
 #   kill NAME                Kill a tmux session.
@@ -197,7 +202,7 @@ VAULT
     # 4. Portable agent tuning. Best-effort: ';'-chained (not '&&') so an unknown
     # key on a future omp version does not abort the rest of the batch.
     info "Applying portable agent tuning (omp config set)…"
-    remote "bash -lc 'omp config set todo.eager always; omp config set search.contextBefore 1; omp config set search.contextAfter 1; omp config set readLineNumbers true; omp config set lsp.diagnosticsOnEdit true; omp config set steeringMode all; omp config set checkpoint.enabled true; omp config set async.enabled true; omp config set inspect_image.enabled true; omp config set task.isolation.mode rcopy; omp config set task.isolation.merge patch; omp config set task.isolation.commits ai; omp config set task.maxConcurrency 8; omp config set task.eager default; omp config set mcp.discoveryMode true; omp config set symbolPreset nerd; omp config set hideThinkingBlock false; omp config set providers.tinyModel lfm2-350m'" </dev/null \
+    remote "bash -lc 'omp config set todo.eager always; omp config set search.contextBefore 1; omp config set search.contextAfter 1; omp config set readLineNumbers true; omp config set lsp.diagnosticsOnEdit true; omp config set steeringMode all; omp config set checkpoint.enabled true; omp config set async.enabled true; omp config set inspect_image.enabled true; omp config set task.isolation.mode rcopy; omp config set task.isolation.merge patch; omp config set task.isolation.commits ai; omp config set task.maxConcurrency 8; omp config set task.eager default; omp config set mcp.discoveryMode true; omp config set symbolPreset nerd; omp config set hideThinkingBlock false'" </dev/null \
         || warn "some omp config set keys were rejected (best-effort tuning)"
 
     # modelRoles is a JSON-record setting (the dotted 'modelRoles.<role>' form is not a
@@ -285,16 +290,20 @@ cmd_list() {
 }
 
 cmd_new() {
-    local name="" subtree="${SUBTREE}"
+    local name=""
+    local -a subtrees=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --subtree) subtree="${2:-}"; shift 2 || die "--subtree needs a value" ;;
+            --subtree) subtrees+=("${2:?--subtree needs a value}"); shift 2 ;;
             *) [[ -z "${name}" ]] && name="$1"; shift ;;
         esac
     done
-    [[ -n "${name}" ]] || die "Usage: ./manager.sh new NAME [--subtree SUBTREE]"
-    valid_name  "${name}"    || die "Invalid session name: ${name}"
-    valid_token "${subtree}" || die "Invalid subtree: ${subtree}"
+    [[ ${#subtrees[@]} -gt 0 ]] || subtrees=("${SUBTREE}")
+    [[ -n "${name}" ]] || die "Usage: ./manager.sh new NAME [--subtree SUB]..."
+    valid_name "${name}" || die "Invalid session name: ${name}"
+    local s
+    for s in "${subtrees[@]}"; do valid_token "$s" || die "Invalid subtree: $s"; done
+    local subtree_list="${subtrees[*]}"
     require_running
 
     # Detect a passphrase-protected vault and read the passphrase up front, BEFORE
@@ -310,30 +319,48 @@ cmd_new() {
         die "Session '${name}' already exists. Use: ./manager.sh attach ${name}"
     fi
 
-    info "Provisioning session '${name}' (subtree: ${subtree})…"
+    info "Provisioning session '${name}' (subtrees: ${subtree_list})…"
     # Seed the per-folder .omp/ and generate the env-injecting launcher. The
-    # launcher contains only 'pass show' COMMANDS — never credential values —
-    # so it is safe at rest (R-safe). Entry path under the subtree maps to an
-    # env var: '/' and '-' → '_', uppercased, non-[A-Z0-9_] stripped, e.g.
-    # services/github/token → GITHUB_TOKEN (matches omp's TOKEN secret pattern).
-    gssh -- "NAME='${name}' SUBTREE='${subtree}' bash -s" <<'NEW'
+    # launcher contains only 'pass show' COMMANDS — never credential values — so it
+    # is safe at rest (R-safe). Multiple subtrees are merged (later --subtree wins
+    # on a name collision). Each entry's path maps to an env var: '/' and '-' → '_',
+    # uppercased, non-[A-Z0-9_] stripped, e.g. services/github/token → GITHUB_TOKEN.
+    # A structured 'key: value' entry exports one <ENTRY>_<KEY> var per line;
+    # injecting the 'people' subtree thus namespaces per operator, e.g.
+    # people/alice/atlassian → ALICE_ATLASSIAN_EMAIL / ALICE_ATLASSIAN_TOKEN.
+    gssh -- "NAME='${name}' SUBTREES='${subtree_list}' bash -s" <<'NEW'
 set -e
 WD="$HOME/sessions/$NAME"
 mkdir -p "$WD/.omp/skills"
-if [ ! -d "$HOME/.omp-vault/store/$SUBTREE" ]; then
-  echo "WARN: vault subtree '$SUBTREE' is empty — launcher will export nothing." >&2
-fi
+for SUBTREE in $SUBTREES; do
+  [ -d "$HOME/.omp-vault/store/$SUBTREE" ] || echo "WARN: vault subtree '$SUBTREE' is empty — nothing injected from it." >&2
+done
 {
   printf '#!/usr/bin/env bash\n'
   printf 'export GNUPGHOME="$HOME/.omp-vault/gnupg" PASSWORD_STORE_DIR="$HOME/.omp-vault/store"\n'
-  printf 'SUBTREE=%q\n' "$SUBTREE"
+  printf 'SUBTREES=('; for s in $SUBTREES; do printf ' %q' "$s"; done; printf ' )\n'
   cat <<'LAUNCH'
-while IFS= read -r -d '' f; do
-  rel="${f#${PASSWORD_STORE_DIR}/}"; rel="${rel%.gpg}"
-  key="${rel#${SUBTREE}/}"
-  vname="$(printf '%s' "$key" | sed 's#[/-]#_#g' | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9_]//g')"
-  [ -n "$vname" ] && export "$vname=$(pass show "$rel" | head -1)"
-done < <(find "$PASSWORD_STORE_DIR/$SUBTREE" -name '*.gpg' -print0 2>/dev/null)
+for SUBTREE in "${SUBTREES[@]}"; do
+  [ -d "$PASSWORD_STORE_DIR/$SUBTREE" ] || continue
+  while IFS= read -r -d '' f; do
+    rel="${f#${PASSWORD_STORE_DIR}/}"; rel="${rel%.gpg}"
+    key="${rel#${SUBTREE}/}"
+    base="$(printf '%s' "$key" | sed 's#[/-]#_#g' | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9_]//g')"
+    [ -n "$base" ] || continue
+    content="$(pass show "$rel")"
+    first="$(printf '%s\n' "$content" | head -1)"
+    if printf '%s' "$first" | grep -qE '^[A-Za-z][A-Za-z0-9_-]*:[[:space:]]'; then
+      while IFS= read -r line; do
+        printf '%s' "$line" | grep -qE '^[A-Za-z][A-Za-z0-9_-]*:[[:space:]]' || continue
+        lk="${line%%:*}"; lv="${line#*:}"; lv="${lv#"${lv%%[![:space:]]*}"}"
+        sub="$(printf '%s' "$lk" | sed 's#[/-]#_#g' | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9_]//g')"
+        [ -n "$sub" ] && export "${base}_${sub}=$lv"
+      done < <(printf '%s\n' "$content")
+    else
+      export "$base=$first"
+    fi
+  done < <(find "$PASSWORD_STORE_DIR/$SUBTREE" -name '*.gpg' -print0 2>/dev/null)
+done
 LAUNCH
   printf 'cd %q\n' "$WD"
   printf 'exec omp\n'

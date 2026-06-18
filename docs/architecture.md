@@ -74,7 +74,7 @@ rule on the VM is required for sharing; manager control rides IAP.
 | --- | --- | --- |
 | `omp` (interactive) | The agent host. Owns the single `AgentSession`; runs all tools. | TUI inside tmux |
 | tmux | Keeps the session alive across SSH disconnects; the manager drives it via `send-keys`/`capture-pane`. | — |
-| `pass` vault | At-rest, GPG-encrypted credential store on the VM. A per-session launcher decrypts the configured subtree and exports it as env vars before `exec omp`. | local fs |
+| `pass` vault | At-rest, GPG-encrypted credential store on the VM. A per-session launcher decrypts one or more subtrees (later wins) and exports each entry as env vars before `exec omp`; a multi-line `key: value` entry expands to `<ENTRY>_<KEY>`. | local fs |
 | collab module (in-process) | Seals session frames (AES-256-GCM), multiplexes guests, dials the relay. | outbound wss |
 | relay | Blind rendezvous. Routes opaque ciphertext between host and guests; serves the browser client at `/`. | wss |
 | `omp join` / web client | Guests. Render the session natively; prompt/interrupt if write-capable. | wss to relay |
@@ -89,11 +89,14 @@ Design (selected POC, "Approach A"): **env injection from a `pass` vault + globa
 
 - The manager keeps a no-passphrase ed25519 `pass` vault at `~/.omp-vault` on the VM.
   Entries live under a subtree (default `services`), e.g. `services/github/token`.
-- `manager.sh new` generates a per-session launcher that decrypts the whole subtree
-  and exports each entry as an env var, then `exec omp`. The entry path maps to the
-  var name (`/` and `-` → `_`, uppercased), so `services/github/token` → `GITHUB_TOKEN`
-  — which matches omp's `TOKEN` secret-name pattern. The launcher contains only
-  `pass show` commands, never values.
+- `manager.sh new` generates a per-session launcher that decrypts one or more subtrees
+  (`--subtree` repeats; a later subtree wins on a name collision) and exports each entry
+  as an env var, then `exec omp`. The entry path maps to the var name (`/` and `-` → `_`,
+  uppercased), so `services/github/token` → `GITHUB_TOKEN` — which matches omp's `TOKEN`
+  secret-name pattern. A multi-line `key: value` entry expands to one `<ENTRY>_<KEY>` var
+  per line, so injecting the `people` subtree namespaces each operator's identity and
+  credentials (`people/alice/atlassian` → `ALICE_ATLASSIAN_EMAIL`/`ALICE_ATLASSIAN_TOKEN`).
+  The launcher contains only `pass show` commands, never values.
 - Global `secrets.enabled: true` replaces matched env-var values with `#XXXX#`
   placeholders before any outbound text reaches the model. `~/.omp/agent/secrets.yml`
   holds value-shape regex backstops for vars whose name lacks a secret keyword.
@@ -242,7 +245,7 @@ with the new link; their prior local session is restored on `/leave`.
 | `manager.sh setup` | enable `secrets.enabled`, ensure the vault, install global assets (rules, command, skills, secret patterns), apply portable tuning + `modelRoles` |
 | `manager.sh tune [--memory] [--thinking]` | apply opt-in local-model tuning (mnemopi memory / auto thinking; local ONNX, no Ollama) |
 | `manager.sh vault-add ENTRY` | insert a credential (value on stdin, never echoed) |
-| `manager.sh new NAME [--subtree SUB]` | launch a session with seeded `.omp/` + injected creds |
+| `manager.sh new NAME [--subtree SUB]...` | launch a session with seeded `.omp/` + injected creds (`--subtree` repeats; merge, later wins) |
 | `manager.sh collab [NAME] [view]` | print the current join link (re-share if needed) |
 | `manager.sh attach [NAME]` | attach to a session (most recent if NAME omitted) |
 | `omp join "<link>"` | from any user machine |
