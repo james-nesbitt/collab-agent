@@ -74,6 +74,9 @@ upload() {
 
 # Validate a session/subtree token (no shell metacharacters → safe to interpolate).
 valid_token() { [[ "$1" =~ ^[A-Za-z0-9_/-]+$ ]]; }
+# Validate a session name (stricter than valid_token: no '/', so it is safe to
+# interpolate into remote tmux -t targets, filesystem paths, and the sed delimiter).
+valid_name() { [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]]; }
 
 # ---------------------------------------------------------------------------
 # Platform config subcommands
@@ -172,7 +175,7 @@ cmd_new() {
         esac
     done
     [[ -n "${name}" ]] || die "Usage: ./manager.sh new NAME [--subtree SUBTREE]"
-    valid_token "${name}"    || die "Invalid session name: ${name}"
+    valid_name  "${name}"    || die "Invalid session name: ${name}"
     valid_token "${subtree}" || die "Invalid subtree: ${subtree}"
     require_running
 
@@ -228,12 +231,14 @@ NEW
 cmd_attach() {
     require_running
     local name="${1:-}"
-    if [[ -z "${name}" ]]; then
-        name="$(resolve_session)"
-        info "Attaching to most recent session: '${name}'"
-    else
+    if [[ -n "${name}" ]]; then
+        valid_name "${name}" || die "Invalid session name: ${name}"
         session_exists "${name}" || die "Session '${name}' does not exist. Use: ./manager.sh new ${name}"
         info "Attaching to session '${name}'…"
+    else
+        name="$(resolve_session)"
+        valid_name "${name}" || die "Refusing to attach: session name from the VM is unsafe: ${name}"
+        info "Attaching to most recent session: '${name}'"
     fi
     remote_tty "tmux attach -t ${name}"
 }
@@ -241,6 +246,7 @@ cmd_attach() {
 cmd_kill() {
     local name="${1:-}"
     [[ -n "${name}" ]] || die "Usage: ./manager.sh kill NAME"
+    valid_name "${name}" || die "Invalid session name: ${name}"
     require_running
     session_exists "${name}" || die "Session '${name}' does not exist."
     info "Killing session '${name}'…"
@@ -251,6 +257,7 @@ cmd_kill() {
 cmd_collab() {
     require_running
     local name; name="$(resolve_session "${1:-}")"
+    valid_name "${name}" || die "Refusing to act on unsafe session name: ${name}"
     local mode="${2:-}"
     session_exists "${name}" || die "Session '${name}' does not exist."
     local slash="/collab"; [[ "${mode}" == "view" ]] && slash="/collab view"
