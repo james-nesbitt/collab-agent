@@ -1,5 +1,5 @@
-# Example: omp-config ConfigMap shape — rendered and applied by manager.sh setup
-# Do not apply this directly; use: ./manager.sh setup
+# Example: omp-config ConfigMap shape — rendered and applied by administrator.sh setup
+# Do not apply this directly; use: ./administrator.sh setup
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -7,7 +7,7 @@ metadata:
   namespace: omp-system
 data:
   config.yml: |
-    # omp platform config — managed by manager.sh setup/tune
+    # omp platform config — managed by administrator.sh setup/tune
     secrets:
       enabled: true
     modelRoles:

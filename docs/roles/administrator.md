@@ -1,9 +1,10 @@
 # Administrator Guide
 
-You are the **administrator**. Your job is to stand up and maintain the GKE cluster that
-everything else runs on — nothing more. Once the cluster exists and the platform runtime
-(ESO, CRD, operator) is installed, you hand off to the [manager](manager.md), who owns
-omp configuration, the GSM vault, and session lifecycle.
+You are the **administrator**. Your job is to stand up and maintain the GKE cluster,
+configure the omp platform, and manage the credential vault. Once the cluster exists,
+the platform runtime (ESO, CRD, operator) is bootstrapped, the platform is configured
+(`setup`), and credentials are stored (`vault-add`), you hand off to the
+[manager](manager.md) who creates and shares sessions.
 
 Everything you do goes through **`administrator.sh`**, run from this repo on your
 laptop. There is no VM, no static IP, and no SSH. All cluster access is via
@@ -62,9 +63,80 @@ What it does:
 - Waits for the `omp-operator` Deployment (ns `omp-system`) and ESO to become Available.
 - Prints `BOOTSTRAP_OK`.
 
-Now hand off: the manager runs `./manager.sh setup` (see the [manager guide](manager.md)).
+Now run `setup`.
 
-## 3. Day to day
+## 3. First time: configure the platform
+
+```bash
+./administrator.sh setup
+```
+
+One idempotent command does two things:
+
+1. Applies the ESO `ClusterSecretStore omp-gsm` (backed by GCP Secret Manager via
+   Workload Identity) — the bridge between GSM and per-session Kubernetes Secrets.
+2. Creates (or patches) the master `omp-config` ConfigMap in `omp-system` with:
+   - Global secret obfuscation (`secrets.enabled: true`) so credential values are
+     replaced with `#XXXX#` before any text reaches the model.
+   - `modelRoles`: default `claude-sonnet-4-6`, plan `claude-opus-4-8`, slow + smol
+     `claude-haiku-4-5`.
+   - Portable agent tuning (editor/task defaults).
+
+You'll see `SETUP_OK`. Re-run any time you change `platform/` files or rotate config
+— it overwrites the ConfigMap; running pods pick up the new config on next restart.
+
+### Optional: tune the agent's local models
+
+Two extra capabilities are off by default:
+
+```bash
+./administrator.sh tune --memory      # mnemopi long-term memory across sessions
+./administrator.sh tune --thinking    # automatic per-turn thinking-level selection
+./administrator.sh tune               # both
+```
+
+`tune` patches the master `omp-config` ConfigMap. Running pods pick it up on next
+restart (`kubectl delete pod omp -n omp-session-NAME` to force it immediately).
+Both capabilities run on local ONNX models (`qwen3-1.7b`), CPU-only. Expect `TUNE_OK`.
+
+## 4. Store the credentials people will need
+
+Credentials live in **GCP Secret Manager** under a subtree (default `services`). Add
+one by piping the value in on **stdin** — never as an argument, so it never lands in
+your shell history or the process list:
+
+```bash
+printf '%s' "$MY_GITHUB_TOKEN" | ./administrator.sh vault-add services/github/token
+```
+
+`vault-add` is idempotent: it creates the GSM secret if absent, then adds a new secret
+version. The path is stored with labels `omp_vault=true` and
+`omp_subtree=<subtree-slug>` so the operator can enumerate it. Check what's there
+(names only, never values):
+
+```bash
+./administrator.sh vault-ls           # all vault entries
+./administrator.sh vault-ls services  # one subtree
+```
+
+**Naming matters.** The entry path becomes an environment variable name inside the
+session: `/` and `-` become `_`, uppercased, with the subtree prefix stripped. So
+`services/github/token` → `GITHUB_TOKEN`, which matches omp's `TOKEN` pattern and is
+auto-obfuscated. End an entry with a secret keyword (`token`, `key`, `secret`,
+`password`) so obfuscation fires. If you must use a name that doesn't match, add a
+value-shape regex to `platform/secrets.yml` and re-run `setup`.
+
+**The `mirantis-services` skill needs two entries:**
+
+```bash
+printf '%s' "$ATLASSIAN_EMAIL" | ./administrator.sh vault-add services/atlassian/email
+printf '%s' "$ATLASSIAN_TOKEN" | ./administrator.sh vault-add services/atlassian/token
+```
+
+They inject as `ATLASSIAN_EMAIL` / `ATLASSIAN_TOKEN`. `token` auto-obfuscates; `email`
+is not a secret.
+
+## 5. Day to day
 
 - **Check on it.** `./administrator.sh status` prints a cluster summary, node list, and
   all current Sessions cluster-wide.
@@ -75,7 +147,7 @@ Now hand off: the manager runs `./manager.sh setup` (see the [manager guide](man
   push images. Set GHCR packages to **public** after the first CI push so GKE pulls
   anonymously without an imagePullSecret (GitHub → repo → Packages → package settings).
 
-## 4. Tearing it down
+## 6. Tearing it down
 
 ```bash
 ./administrator.sh destroy
@@ -104,11 +176,13 @@ CLUSTER_NAME=omp-staging ZONE=us-central1-a ./administrator.sh provision
 | `ADMIN_GCP_ACCOUNT` | active gcloud account | `provision`, `bootstrap` |
 | `OMP_REGISTRY` | `ghcr.io/james-nesbitt/collab-agent` | `bootstrap` |
 | `OMP_IMAGE_TAG` | `latest` | `bootstrap` |
+| `SUBTREE` | `services` | `vault-add` default subtree |
 
 ## What you don't do
 
-You never configure omp, touch GSM secrets, or create sessions. The moment
-`BOOTSTRAP_OK` prints, that's the [manager's](manager.md) job. If something's wrong with
-a *session* (not the cluster or operator), it's a manager problem. For the bigger picture
-— how ESO syncs credentials into session namespaces, how NetworkPolicy isolates sessions,
-how the collab link is captured — read [the architecture doc](../architecture.md).
+You never create or manage sessions — that is the [manager's](manager.md) job, done
+directly with `kubectl`. You never build or push images — that's the GHCR CI
+workflow (`.github/workflows/build-images.yml`), triggered by pushing to the repo.
+For the bigger picture — how ESO syncs credentials into session namespaces, how
+NetworkPolicy isolates sessions, how the collab link is captured — read
+[the architecture doc](../architecture.md).

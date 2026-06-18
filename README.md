@@ -11,7 +11,6 @@ See [docs/architecture.md](docs/architecture.md) for the full picture.
 
 ```
 administrator.sh  — GKE cluster + IAM lifecycle
-manager.sh        — GSM vault + omp config + Session lifecycle
 lib/common.sh     — shared config + helpers (sourced)
 Dockerfile        — session image (rootless docker+podman + mise/bun/omp)
 docker/           — entrypoint.sh
@@ -33,20 +32,30 @@ docs/             — architecture, role guides, planning
 ./administrator.sh bootstrap   # ESO + CRD + operator
 ```
 
-### 2. Configure the platform and vault (manager)
+### 2. Configure the platform and vault (administrator)
 
 ```bash
-./manager.sh setup             # ESO ClusterSecretStore + omp-config ConfigMap
-printf '%s' "$GITHUB_TOKEN" | ./manager.sh vault-add services/github/token
-./manager.sh vault-ls          # confirm
+./administrator.sh setup
+printf '%s' "$GITHUB_TOKEN" | ./administrator.sh vault-add services/github/token
+./administrator.sh vault-ls          # confirm
 ```
 
-### 3. Launch a session
+### 3. Launch a session (manager)
 
 ```bash
-./manager.sh new work --subtree services
-./manager.sh login work        # Anthropic OAuth (persists on PVC)
-./manager.sh collab work       # prints: omp join "..."
+kubectl apply -f - <<EOF
+apiVersion: omp.mirantis.io/v1alpha1
+kind: Session
+metadata:
+  name: work
+  namespace: omp-system
+spec:
+  subtrees: ["services"]
+  view: false
+EOF
+kubectl wait --for=jsonpath='{.status.phase}'=Hosting session/work -n omp-system --timeout=180s
+kubectl exec -it -n omp-session-work omp -- bash -lc 'omp auth login'  # Anthropic OAuth (persists on PVC)
+kubectl get session work -n omp-system -o jsonpath='{.status.joinLink}'  # prints join link
 ```
 
 ### 4. Join as an operator
@@ -60,7 +69,7 @@ No omp installed? Paste the link at `my.omp.sh`.
 ### 5. Tear down
 
 ```bash
-./manager.sh kill work         # delete session + namespace + PVC
+kubectl delete session work -n omp-system  # delete session + namespace + PVC
 ./administrator.sh destroy     # delete cluster + SAs + IAM bindings
 ```
 

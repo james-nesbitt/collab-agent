@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # lib/common.sh — shared configuration and helpers for the remote-agent-machine
-# tooling (administrator.sh + manager.sh). Sourced, never executed directly.
+# tooling (administrator.sh). Sourced, never executed directly.
 #
 # A sourcing script SHOULD set LOG_TAG before sourcing (e.g. LOG_TAG=admin);
 # it defaults to "omp".

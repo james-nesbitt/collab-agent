@@ -29,8 +29,8 @@ multi-tenant cluster access (single admin account).
 
 | Role | Surface | Owns |
 | --- | --- | --- |
-| **Administrator** | `administrator.sh` | GKE cluster lifecycle: provision (cluster + IAM + GCP SAs), bootstrap (ESO, CRD, operator), credentials, status, destroy. Pure infra — no omp config, no sessions. |
-| **Manager** | `manager.sh` | GSM vault (`vault-add` / `vault-ls`), omp platform config (ConfigMap `omp-config` in `omp-system`), portable tuning incl. `modelRoles`, opt-in memory + thinking via `tune`; per-session lifecycle (`new` / `login` / `attach` / `list` / `kill` / `collab`) via `Session` CRs. |
+| **Administrator** | `administrator.sh` | GKE cluster lifecycle (provision, bootstrap, credentials, status, destroy); platform setup (`setup`, `tune`); credential vault (`vault-add`, `vault-ls`). |
+| **Manager** | `administrator.sh` + `kubectl` | Session lifecycle via `kubectl` (apply/delete/exec Session CRs); vault and platform config via `administrator.sh`. |
 | **Operator / joiner** | *(no script)* | Interacts only by `omp join`-ing the shared session. Behaviour governed by `RULES.md`/`AGENTS.md` and skills baked into the image. |
 
 ---
@@ -40,8 +40,8 @@ multi-tenant cluster access (single admin account).
 ```mermaid
 graph TB
   subgraph LAP["administrator / manager @ laptop"]
-    ADM["administrator.sh\n(gcloud container + kubectl)"]
-    MGR["manager.sh\n(kubectl + gcloud secrets)"]
+    ADM["administrator.sh\n(gcloud + kubectl + vault)"]
+    MGR["kubectl\n(Session CRs)"]
   end
   GSM["GCP Secret Manager\n(the vault)"]
   subgraph GKE["GKE Standard cluster — omp-cluster\n3× Ubuntu e2-standard-4, europe-west1-b\nDataplane V2 + Workload Identity"]
@@ -67,7 +67,7 @@ graph TB
   OP -->|"exec /collab → status.joinLink"| POD
   ESO -->|read values| GSM
   ESO --> ES
-  MGR -->|gcloud secrets| GSM
+  ADM -->|vault-add / gcloud secrets| GSM
   POD -. "collab (outbound wss 443)" .-> RELAY
   CI["GitHub Actions\nbuild-images.yml"] -->|build + push| GHCR["ghcr.io\nomp-session / omp-operator"]
   GHCR -. "image pull" .-> POD
@@ -90,7 +90,7 @@ firewall rule or inbound NetworkPolicy rule is needed. Manager control rides
 | GCP Secret Manager | At-rest credential store. Entries labelled `omp_vault=true`, `omp_subtree=<subtree>`. ESO's WI SA is the only accessor. | HTTPS |
 | PVC `omp-home` (50 Gi, `standard-rwo`) | Persists `$HOME`: omp OAuth tokens, `~/work`, session transcripts. Survives pod restarts; deleted when the Session CR is deleted. | GKE Persistent Disk |
 | `omp` pod | The agent host. Runs omp under tmux; rootless dockerd + podman (vfs driver, uid 1000, non-privileged). Platform assets baked at `/opt/omp/agent/`; seeded to `$HOME` each boot by the entrypoint. | — |
-| ConfigMap `omp-config` | Master omp `config.yml` in `omp-system`; mounted read-only at `/etc/omp/config.yml` in every session pod. Updated by `manager.sh setup` / `tune`. | K8s volume mount |
+| ConfigMap `omp-config` | Master omp `config.yml` in `omp-system`; mounted read-only at `/etc/omp/config.yml` in every session pod. Updated by `administrator.sh setup` / `tune`. | K8s volume mount |
 | collab module (in-process) | Seals session frames (AES-256-GCM), multiplexes guests, dials the relay. Identical to prior design. | outbound wss |
 | relay | Blind rendezvous. Routes opaque ciphertext; serves browser client at `/`. | wss |
 | `omp join` / web client | Guests. Render session natively; prompt/interrupt if write-capable. | wss to relay |
@@ -111,7 +111,7 @@ Design: **GSM → ESO → per-namespace K8s Secret → pod `envFrom`** + global
   K8s Secret `omp-creds` in that namespace. Refresh interval: 1 h.
 - The entry path maps to the env var name: strip the subtree prefix, replace `/`
   and `-` with `_`, uppercase. Example: `services-github-token` (subtree `services`)
-  → `GITHUB_TOKEN`. This matches the existing transform from `manager.sh`.
+  → `GITHUB_TOKEN`.
 - The session pod's `envFrom` references `omp-creds`. The operator SA
   (`omp-operator`, `secretmanager.viewer`) only reads metadata — never values.
 - Global `secrets.enabled: true` (in the master ConfigMap) replaces matched env-var
@@ -242,14 +242,14 @@ No inbound ports on any session pod. No IAP/SSH path.
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Pending: kubectl apply Session CR\n(manager.sh new)
+  [*] --> Pending: kubectl apply Session CR
   Pending --> Provisioning: operator reconciles CR
   Provisioning --> Running: ns/PVC/ES/NP/Pod created; pod Ready
   Running --> Hosting: /collab exec succeeds; joinLink written to status
   Hosting --> Hosting: guests join/leave/prompt
   Hosting --> Running: pod restarts; link recapture pending
-  Running --> Terminating: kubectl delete Session CR\n(manager.sh kill)
-  Hosting --> Terminating: kubectl delete Session CR\n(manager.sh kill)
+  Running --> Terminating: kubectl delete Session CR
+  Hosting --> Terminating: kubectl delete Session CR
   Terminating --> [*]: namespace GC cascades PVC + Secret + ExternalSecret + NetworkPolicy + Pod
   note right of Hosting
     status.joinLink updated after each pod restart;
@@ -261,7 +261,7 @@ A pod restart (crash / OOM / manual delete) keeps the Session CR alive. The oper
 re-captures the collab link from the restarted pod and updates `status.joinLink`;
 phase drops to `Running` during recapture and returns to `Hosting` once the link is
 refreshed. The PVC persists `$HOME` (auth tokens, `~/work`) across restarts.
-Deleting the CR (`manager.sh kill`) fully reclaims all resources including the disk.
+Deleting the CR (`kubectl delete session NAME -n omp-system`) fully reclaims all resources including the disk.
 
 ---
 
@@ -273,7 +273,7 @@ Deleting the CR (`manager.sh kill`) fully reclaims all resources including the d
 | pod crash / OOM | K8s `restartPolicy: Always` | automatic restart; operator re-captures collab link; guests rejoin with new link |
 | operator crash | K8s Deployment restarts it | on resume, kopf `@kopf.on.resume` re-reconciles all existing Session CRs |
 | ESO sync failure | `ExternalSecret` status `SecretSyncError` | ESO retries; check GSM IAM or secret existence; `kubectl get externalsecret omp-creds -n omp-session-<name>` |
-| stale collab link after pod restart | `status.phase` = `Running` during recapture | `manager.sh collab <name>` triggers re-capture annotation; wait for `Hosting` |
+| stale collab link after pod restart | `status.phase` = `Running` during recapture | annotate the Session CR (`kubectl annotate session NAME -n omp-system omp.mirantis.io/recapture=$(date +%s) --overwrite`); wait for `Hosting` |
 | guest write without token | host token verify fails | guest downgraded to read-only; no server-side change needed |
 | credential printed by a tool | value lands in `~/work/*.jsonl` and on guest screens | `RULES.md` forbids printing; rotate the leaked entry in GSM |
 | node failure | GKE node controller evicts pod; rescheduled | PVC re-attaches on new node within the same zone (zonal `standard-rwo` disk) |
@@ -289,16 +289,16 @@ Deleting the CR (`manager.sh kill`) fully reclaims all resources including the d
 | `administrator.sh credentials` | `gcloud container clusters get-credentials` (thin convenience) |
 | `administrator.sh status` | cluster describe + `kubectl get nodes` + `kubectl get sessions -A` |
 | `administrator.sh destroy` | delete cluster, GCP SAs, IAM bindings |
-| `manager.sh setup` | apply `ClusterSecretStore omp-gsm`, create/patch master ConfigMap `omp-config` in `omp-system` |
-| `manager.sh tune [--memory] [--thinking]` | patch `omp-config` ConfigMap with mnemopi / auto-thinking keys; running pods pick up on next restart |
-| `manager.sh vault-add ENTRY` | insert credential into GSM (value on stdin, never echoed) |
-| `manager.sh vault-ls [SUBTREE]` | list GSM secret names for the vault (names only, never values) |
-| `manager.sh new NAME [--subtree SUB]…` | create Session CR; wait for `status.phase=Hosting` |
-| `manager.sh login NAME` | `kubectl exec -it` into pod for in-session OAuth (`omp auth login`); token persists on PVC |
-| `manager.sh collab [NAME] [view]` | print current `status.joinLink` (or `status.viewLink`); triggers re-capture if stale |
-| `manager.sh attach [NAME]` | `kubectl exec -it … tmux attach -t omp` (most-recent session if NAME omitted) |
-| `manager.sh list` | `kubectl get sessions -n omp-system` |
-| `manager.sh kill NAME` | `kubectl delete session NAME -n omp-system` → GC namespace + PVC |
+| `administrator.sh setup` | apply `ClusterSecretStore omp-gsm`, create/patch master ConfigMap `omp-config` in `omp-system` |
+| `administrator.sh tune [--memory] [--thinking]` | patch `omp-config` ConfigMap with mnemopi / auto-thinking keys; running pods pick up on next restart |
+| `administrator.sh vault-add ENTRY` | insert credential into GSM (value on stdin, never echoed) |
+| `administrator.sh vault-ls [SUBTREE]` | list GSM secret names for the vault (names only, never values) |
+| `kubectl apply` (Session CR in omp-system; see manager guide) | create Session CR; operator provisions namespace + PVC + pod; wait for `status.phase=Hosting` |
+| `kubectl exec -it -n omp-session-NAME omp -- bash -lc 'omp auth login'` | in-pod OAuth for interactive model auth; token persists on PVC |
+| `kubectl get session NAME -n omp-system -o jsonpath='{.status.joinLink}'` | print join link from Session CR status (use `status.viewLink` for read-only) |
+| `kubectl exec -it -n omp-session-NAME omp -- tmux attach -t omp` | attach to session tmux |
+| `kubectl get sessions -n omp-system` | list all Session CRs |
+| `kubectl delete session NAME -n omp-system` | delete Session CR → GC namespace + PVC |
 | `omp join "<link>"` | from any user machine |
 
 ---

@@ -1,14 +1,13 @@
 ---
 name: administrator
-description: Act as the administrator for the GKE cluster from this repo — provision the cluster + IAM, bootstrap the platform runtime (ESO, operator), check status, get credentials, and destroy. Use when the user asks to create, stand up, bootstrap, check on, get credentials for, or tear down the GKE cluster. This is infrastructure only; for omp config, the vault, or sessions use the `manager` skill.
+description: Act as the administrator for the GKE cluster from this repo — provision the cluster + IAM, bootstrap the platform runtime (ESO, operator), check status, get credentials, destroy, configure the platform (setup/tune), and manage the credential vault (vault-add/vault-ls). Use when the user asks to create, stand up, bootstrap, check on, get credentials for, or tear down the GKE cluster; configure omp; or add/list credentials in the vault. For session lifecycle (new/login/attach/kill/collab) use the `manager` skill.
 ---
 
 # Administrator
 
-You drive the **GKE cluster lifecycle** via `./administrator.sh`, run from the repo root.
-This role is pure infrastructure: make the cluster and platform runtime exist. Anything
-about omp itself — secrets, the credential store, sessions, collab — is the
-[`manager`](skill://manager) skill.
+You drive the **GKE cluster lifecycle, platform config, and credential vault** via
+`./administrator.sh`, run from the repo root. Session lifecycle (applying CRs, attaching,
+getting collab links) is the [`manager`](skill://manager) skill.
 
 Full reference: read `docs/roles/administrator.md`.
 
@@ -28,21 +27,40 @@ Full reference: read `docs/roles/administrator.md`.
 | Fetch kubectl credentials | `./administrator.sh credentials` |
 | Cluster + node + session status | `./administrator.sh status` |
 | Permanently delete cluster + SAs + IAM | `./administrator.sh destroy` |
+| Apply ClusterSecretStore + omp-config ConfigMap | `./administrator.sh setup` |
+| Tune local-model features (mnemopi, auto thinking) | `./administrator.sh tune [--memory] [--thinking]` (no flag = both) |
+| Store a credential (value on **stdin**) | `printf '%s' "$VAL" \| ./administrator.sh vault-add services/github/token` |
+| List vault entry NAMES (never values) | `./administrator.sh vault-ls [SUBTREE]` |
 
-`provision`, `bootstrap`, and `credentials` are idempotent. After `bootstrap`, hand off:
-the `manager` skill runs `./manager.sh setup`.
+`provision`, `bootstrap`, `credentials`, and `setup` are idempotent.
 
 ## Workflows
 
-- **Stand up from scratch:** `provision` → `bootstrap` (confirm `BOOTSTRAP_OK`), then
-  tell the user to use the manager skill for `setup`.
+- **Stand up from scratch:** `provision` → `bootstrap` (confirm `BOOTSTRAP_OK`) →
+  `setup` (confirm `SETUP_OK`) → add credentials with `vault-add` → use the
+  manager skill to create sessions.
+
 - **Inspect:** `status` for cluster state + nodes + sessions; `credentials` to refresh
   kubectl context.
 
+- **Add a credential:** pipe the value on stdin — never as an argument.
+  Entry path becomes env var name (`/` and `-` → `_`, uppercased, subtree prefix stripped):
+  `services/github/token` → `GITHUB_TOKEN`. End entry names with a secret keyword
+  (`token`, `key`, `secret`, `password`) so obfuscation fires.
+
+- **The `mirantis-services` skill needs:**
+  ```bash
+  printf '%s' '<email>' | ./administrator.sh vault-add services/atlassian/email
+  printf '%s' '<token>' | ./administrator.sh vault-add services/atlassian/token
+  ```
+
+- **Enable local-model features:** `tune --memory` and/or `--thinking`; no flag = both.
+  Patches the omp-config ConfigMap; running pods pick it up on next restart.
+
 ## Guardrails
 
-- `destroy` is irreversible and deletes the cluster + all session PVCs — it prompts for
-  `yes`; surface the warning to the user before running.
+- `destroy` is irreversible — prompts for `yes`; surface the warning to the user before
+  running.
 - Images come from GHCR CI; this role never builds or pushes images.
-- Do **not** configure omp, the credential store, or sessions. Switch to `manager`.
+- Never echo a credential value — `vault-add` reads from stdin only.
 - These scripts never push or open PRs; follow the repo git rules for any commits.

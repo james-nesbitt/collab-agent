@@ -20,30 +20,30 @@ https://download.docker.com/linux/ubuntu noble stable" \
         docker-ce docker-ce-cli containerd.io docker-ce-rootless-extras && \
     rm -rf /var/lib/apt/lists/*
 
-# ── 2. Create omp user ───────────────────────────────────────────────────────
-RUN groupadd -g 1000 omp && \
-    useradd -u 1000 -g 1000 -m -s /bin/bash omp
+# ── 2. Rename base user ubuntu → omp (preserves UID/GID 1000) ───────────────
+RUN groupmod -n omp ubuntu && \
+    usermod -l omp -d /home/omp -m -s /bin/bash ubuntu
 
 # ── 3. Subordinate UID/GID ranges for rootless engines ──────────────────────
 RUN echo 'omp:100000:65536' >> /etc/subuid && \
     echo 'omp:100000:65536' >> /etc/subgid
 
-# ── 4. Install mise + bun + omp (as user omp) ───────────────────────────────
+# ── 4. Install mise + bun + omp (as user omp) ────────────────────────────────
 USER omp
 WORKDIR /home/omp
 
 RUN curl -fsSL https://mise.run | sh && \
-    echo 'export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"' >> /home/omp/.profile && \
-    echo 'eval "$(~/.local/bin/mise activate bash --shims)" 2>/dev/null || true' >> /home/omp/.profile && \
-    /home/omp/.local/bin/mise use -g bun@latest && \
-    /home/omp/.local/bin/mise exec bun -- bun install -g @oh-my-pi/pi-coding-agent
+    echo 'export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"' >> "$HOME/.profile" && \
+    echo 'eval "$($HOME/.local/bin/mise activate bash --shims)" 2>/dev/null || true' >> "$HOME/.profile" && \
+    "$HOME/.local/bin/mise" use -g bun@latest && \
+    "$HOME/.local/bin/mise" exec bun -- bun install -g @oh-my-pi/pi-coding-agent
 
 # ── 5. vfs storage driver for podman ────────────────────────────────────────
 # Uses vfs so no /dev/fuse device or device-plugin is needed in a
 # non-privileged pod. fuse-overlayfs is present for a future overlay switch
 # if a /dev/fuse device plugin is added.
-RUN mkdir -p /home/omp/.config/containers && \
-    printf '[storage]\ndriver = "vfs"\n' > /home/omp/.config/containers/storage.conf
+RUN mkdir -p "$HOME/.config/containers" && \
+    printf '[storage]\ndriver = "vfs"\n' > "$HOME/.config/containers/storage.conf"
 
 # ── 6. Bake platform assets (as root) ───────────────────────────────────────
 USER root

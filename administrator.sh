@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# administrator.sh — administrator role: GKE cluster lifecycle + IAM.
+# administrator.sh — administrator role: GKE cluster lifecycle + IAM + platform config + vault.
 #
 # Usage:
 #   ./administrator.sh <subcommand> [args...]
@@ -12,10 +12,25 @@
 #   credentials              Fetch kubectl credentials for the cluster.
 #   status                   Cluster summary + node + session list.
 #   destroy                  Delete the cluster, GCP SAs, and IAM bindings.
+#   setup                    Configure the ESO ClusterSecretStore, create/update the
+#                            master omp-config ConfigMap in omp-system (secrets.enabled,
+#                            modelRoles, portable tuning), and print SETUP_OK.
+#   vault-add ENTRY          Insert a credential into GCP Secret Manager (value read
+#                            from stdin, never echoed). Entry format: subtree/key/...
+#                            e.g.  printf '%s' "$TOK" | ./administrator.sh vault-add \
+#                            services/github/token
+#   vault-ls [SUBTREE]       List vault entry NAMES only (no values).
+#   tune [--memory] [--thinking]
+#                            Patch the master omp-config ConfigMap with opt-in tuning:
+#                            mnemopi long-term memory (--memory) and/or automatic
+#                            thinking-level selection (--thinking). No flag = both.
+#                            New sessions pick it up; running pods on next restart.
 #   help                     Show this help
 #
+# Session lifecycle (new/login/attach/list/kill/collab) is handled directly with
+# kubectl; see the manager skill.
+#
 # Images are published to GHCR by CI (.github/workflows/build-images.yml).
-# For omp config + secret vault + session lifecycle, see ./manager.sh.
 #
 # Configuration (override via environment):
 #   GCP_PROJECT        (default: tools-348616)
@@ -26,6 +41,7 @@
 #   ADMIN_GCP_ACCOUNT  (default: current gcloud account)
 #   OMP_REGISTRY       (default: ghcr.io/james-nesbitt/collab-agent)
 #   OMP_IMAGE_TAG      (default: latest)
+#   SUBTREE            (default: services) — vault subtree
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -43,6 +59,9 @@ NODE_MACHINE_TYPE="${NODE_MACHINE_TYPE:-e2-standard-4}"
 ADMIN_GCP_ACCOUNT="${ADMIN_GCP_ACCOUNT:-$(gcloud config get-value account 2>/dev/null)}"
 OMP_REGISTRY="${OMP_REGISTRY:-ghcr.io/james-nesbitt/collab-agent}"
 OMP_IMAGE_TAG="${OMP_IMAGE_TAG:-latest}"
+
+SUBTREE="${SUBTREE:-services}"
+SESSION_NS="omp-system"
 
 # GCP service account emails
 SA_ESO="omp-eso@${GCP_PROJECT}.iam.gserviceaccount.com"
@@ -68,6 +87,61 @@ render() {
 sa_exists() {
     gcloud iam service-accounts describe "$1" \
         --project="${GCP_PROJECT}" --format="value(email)" >/dev/null 2>&1
+}
+
+# Detect the served ESO API version (v1 or v1beta1).
+eso_api_version() {
+    local versions
+    versions=$(kubectl get crd externalsecrets.external-secrets.io \
+               -o jsonpath='{.spec.versions[*].name}' 2>/dev/null || echo "")
+    if echo "${versions}" | grep -qw "v1"; then
+        echo "external-secrets.io/v1"
+    else
+        echo "external-secrets.io/v1beta1"
+    fi
+}
+
+# Validate a session/subtree token (no shell metacharacters → safe to interpolate).
+valid_token() { [[ "$1" =~ ^[A-Za-z0-9_/-]+$ ]]; }
+
+# Build the omp config.yml content (base tuning block).
+_base_config_yml() {
+    cat <<'CONFIG'
+# omp platform config — managed by administrator.sh setup/tune
+secrets:
+  enabled: true
+modelRoles:
+  default: anthropic/claude-sonnet-4-6
+  plan: anthropic/claude-opus-4-8
+  slow: anthropic/claude-haiku-4-5
+  smol: anthropic/claude-haiku-4-5
+todo:
+  eager: always
+search:
+  contextBefore: 1
+  contextAfter: 1
+readLineNumbers: true
+lsp:
+  diagnosticsOnEdit: true
+steeringMode: all
+checkpoint:
+  enabled: true
+async:
+  enabled: true
+inspect_image:
+  enabled: true
+task:
+  isolation:
+    mode: rcopy
+    merge: patch
+    commits: ai
+  maxConcurrency: 8
+  eager: default
+mcp:
+  discoveryMode: true
+symbolPreset: nerd
+hideThinkingBlock: false
+CONFIG
 }
 
 # ---------------------------------------------------------------------------
@@ -182,8 +256,7 @@ cmd_provision() {
     echo ""
     echo "  Next steps:"
     echo "    ./administrator.sh bootstrap"
-    echo "    ./manager.sh setup"
-    echo "    ./manager.sh new work"
+    echo "    ./administrator.sh setup"
     echo "============================================================"
 }
 
@@ -231,7 +304,7 @@ cmd_bootstrap() {
     echo "  ESO running in ns external-secrets"
     echo "  Session operator running in ns omp-system"
     echo ""
-    echo "  Next: ./manager.sh setup"
+    echo "  Next: ./administrator.sh setup"
 }
 
 cmd_credentials() {
@@ -293,6 +366,161 @@ cmd_destroy() {
     ok "Destroy complete."
 }
 
+cmd_setup() {
+    require_cluster
+
+    # Fetch credentials if not already configured
+    gcloud container clusters get-credentials "${CLUSTER_NAME}" \
+        --zone="${ZONE}" --project="${GCP_PROJECT}" >/dev/null 2>&1
+
+    # 1. Render + apply ClusterSecretStore (detect ESO API version)
+    info "Detecting ESO API version…"
+    local eso_ver
+    eso_ver=$(eso_api_version)
+    info "ESO API version: ${eso_ver}"
+
+    info "Applying ClusterSecretStore omp-gsm…"
+    GCP_PROJECT="${GCP_PROJECT}" \
+    ZONE="${ZONE}" \
+    CLUSTER_NAME="${CLUSTER_NAME}" \
+        envsubst < "${SCRIPT_DIR}/k8s/clustersecretstore.yaml" \
+        | sed "s|external-secrets.io/v1\b|${eso_ver}|g" \
+        | kubectl apply -f -
+
+    # 2. Create/patch the master omp-config ConfigMap in omp-system
+    info "Creating/updating omp-config ConfigMap in ${SESSION_NS}…"
+    local config_yml
+    config_yml=$(_base_config_yml)
+
+    kubectl create configmap omp-config \
+        --namespace="${SESSION_NS}" \
+        --from-literal="config.yml=${config_yml}" \
+        --dry-run=client -o yaml \
+        | kubectl apply -f -
+
+    echo ""
+    echo "SETUP_OK"
+    echo "  ClusterSecretStore: omp-gsm (${eso_ver})"
+    echo "  ConfigMap omp-config in ${SESSION_NS}"
+    echo ""
+    echo "  Vault:    printf '%s' \"\$VAL\" | ./administrator.sh vault-add services/my/key"
+    echo "  Tune:     ./administrator.sh tune [--memory] [--thinking]"
+    echo "  Sessions: see the manager skill for direct kubectl session management"
+}
+
+cmd_tune() {
+    local do_memory=false do_thinking=false
+    if [[ $# -eq 0 ]]; then
+        do_memory=true; do_thinking=true
+    fi
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --memory)   do_memory=true; shift ;;
+            --thinking) do_thinking=true; shift ;;
+            *) die "Unknown tune option: $1 (use --memory and/or --thinking)" ;;
+        esac
+    done
+
+    require_cluster
+
+    # Read the current config, patch it, and re-apply.
+    local current_config
+    current_config=$(kctl get configmap omp-config -n "${SESSION_NS}" \
+                     -o jsonpath='{.data.config\.yml}' 2>/dev/null || echo "")
+    [[ -n "${current_config}" ]] || current_config=$(_base_config_yml)
+
+    local patched_config="${current_config}"
+
+    if [[ "${do_memory}" == true ]]; then
+        info "Adding mnemopi long-term memory tuning…"
+        patched_config="${patched_config}
+memory:
+  backend: mnemopi
+mnemopi:
+  scoping: per-project-tagged
+  noEmbeddings: true
+  llmMode: smol
+providers:
+  memoryModel: qwen3-1.7b
+memories:
+  minRolloutIdleHours: 6
+  maxRolloutAgeDays: 30
+  summaryInjectionTokenLimit: 5000"
+        ok "memory.backend=mnemopi"
+    fi
+
+    if [[ "${do_thinking}" == true ]]; then
+        info "Adding automatic thinking-level tuning…"
+        patched_config="${patched_config}
+defaultThinkingLevel: auto
+providers:
+  autoThinkingModel: qwen3-1.7b"
+        ok "defaultThinkingLevel=auto"
+    fi
+
+    kubectl create configmap omp-config \
+        --namespace="${SESSION_NS}" \
+        --from-literal="config.yml=${patched_config}" \
+        --dry-run=client -o yaml \
+        | kctl apply -f -
+
+    echo ""
+    echo "TUNE_OK"
+    echo "  Note: running pods pick up the new config on next restart."
+}
+
+cmd_vault_add() {
+    local entry="${1:-}"
+    [[ -n "${entry}" ]] || die "Usage: ./administrator.sh vault-add ENTRY   (value on stdin)"
+    valid_token "${entry}" || die "Invalid entry name: ${entry}"
+
+    # Derive GSM secret id and subtree label from the entry path.
+    local subtree="${entry%%/*}"
+    local gsm_id; gsm_id=$(printf '%s' "${entry}" | tr '/' '-')
+    local sublabel; sublabel=$(printf '%s' "${subtree}" | tr '/' '-')
+
+    # Read value from stdin; never echo it.
+    local value
+    value=$(cat)
+    [[ -n "${value}" ]] || die "Empty value on stdin for entry: ${entry}"
+
+    # Create the GSM secret if it doesn't exist yet.
+    if ! gcloud secrets describe "${gsm_id}" --project="${GCP_PROJECT}" >/dev/null 2>&1; then
+        info "Creating GSM secret '${gsm_id}'…"
+        gcloud secrets create "${gsm_id}" \
+            --project="${GCP_PROJECT}" \
+            --replication-policy=automatic \
+            --labels="omp_vault=true,omp_subtree=${sublabel}" \
+            --quiet
+    fi
+
+    # Add a new version with the value piped via --data-file=- (never in argv).
+    info "Adding new version for '${gsm_id}'…"
+    printf '%s' "${value}" \
+        | gcloud secrets versions add "${gsm_id}" \
+            --project="${GCP_PROJECT}" \
+            --data-file=- \
+            --quiet
+
+    ok "ADDED ${entry}"
+}
+
+cmd_vault_ls() {
+    local subtree="${1:-}"
+    [[ -z "${subtree}" ]] || valid_token "${subtree}" || die "Invalid subtree: ${subtree}"
+
+    local filter="labels.omp_vault=true"
+    if [[ -n "${subtree}" ]]; then
+        local sublabel; sublabel=$(printf '%s' "${subtree}" | tr '/' '-')
+        filter+=" AND labels.omp_subtree=${sublabel}"
+    fi
+
+    gcloud secrets list \
+        --project="${GCP_PROJECT}" \
+        --filter="${filter}" \
+        --format="value(name)"
+}
+
 cmd_help() {
     sed -n '2,/^set -/p' "$0" | grep '^#' | sed 's/^# \?//'
 }
@@ -309,6 +537,10 @@ case "${SUBCOMMAND}" in
     credentials)    cmd_credentials "$@" ;;
     status)         cmd_status "$@" ;;
     destroy)        cmd_destroy "$@" ;;
+    setup)          cmd_setup "$@" ;;
+    tune)           cmd_tune "$@" ;;
+    vault-add)      cmd_vault_add "$@" ;;
+    vault-ls)       cmd_vault_ls "$@" ;;
     help|--help|-h) cmd_help ;;
     *)
         echo "Unknown subcommand: ${SUBCOMMAND}" >&2

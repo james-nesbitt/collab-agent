@@ -18,7 +18,7 @@ and it connects with nothing to install.
 
 You'll drop straight into the live session: the same streaming text, tool-call cards,
 footer (cwd, model, context %, cost), and subagent hub everyone else sees. The agent,
-repo, and tools all run on the VM — your machine is just a window.
+repo, and tools all run on the session pod — your machine is just a window.
 
 ## 2. Work in it
 

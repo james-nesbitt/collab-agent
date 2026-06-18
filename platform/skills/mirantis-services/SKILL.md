@@ -6,11 +6,11 @@ description: Query and update Mirantis JIRA and Confluence via credentials injec
 # Mirantis Services (JIRA + Confluence)
 
 JIRA and Confluence share one Atlassian Cloud account. Credentials arrive as
-**environment variables** injected at session start from the per-VM vault subtree
-`services/` (see the `credential-access` skill). You never fetch them yourself — they
-are already in the process environment.
+**environment variables** injected at session start from GCP Secret Manager (see the
+`credential-access` skill). You never fetch them yourself — they are already in the
+process environment.
 
-Required vault entries (the operator adds them once with `./manager.sh vault-add`):
+Required vault entries (the administrator adds them once with `./administrator.sh vault-add`):
 
 | vault entry | env var | value |
 |---|---|---|
@@ -21,8 +21,8 @@ If `ATLASSIAN_EMAIL` / `ATLASSIAN_TOKEN` are unset, the operator has not added t
 yet — tell the user to run:
 
 ```bash
-printf '%s' '<email>' | ./manager.sh vault-add services/atlassian/email
-printf '%s' '<api-token>' | ./manager.sh vault-add services/atlassian/token
+printf '%s' '<email>' | ./administrator.sh vault-add services/atlassian/email
+printf '%s' '<api-token>' | ./administrator.sh vault-add services/atlassian/token
 ```
 
 then start a new session so the vars are injected.

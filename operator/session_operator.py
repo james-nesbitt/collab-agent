@@ -376,21 +376,21 @@ def _wait_pod_ready(ns: str, timeout: int = 300) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Join-link capture (ports manager.sh:432)
+# Join-link capture
 # ---------------------------------------------------------------------------
 
 def _capture_join_link(ns: str, view: bool = False) -> str | None:
     """
     Exec into the running omp pod and capture the collab join link.
 
-    Ports manager.sh:432: send /collab (or /collab view) to the tmux session,
-    wait for omp to process it (~8 s), then capture the pane and grep for the
+    Sends /collab (or /collab view) to the tmux session, waits for omp to
+    process it (~8 s), then captures the pane and greps for the
     'omp join "..."' token.
 
     Returns the raw 'omp join "..."' string, or None if not found.
     """
     slash_cmd = "/collab view" if view else "/collab"
-    # Exact port of the manager.sh:432 one-liner
+    # One-liner: send command, wait, capture pane, grep for join token
     shell = (
         f"tmux send-keys -t omp '{slash_cmd}' && "
         "sleep 1 && "
