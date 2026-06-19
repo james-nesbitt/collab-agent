@@ -57,6 +57,36 @@ Full reference: read `docs/roles/administrator.md`.
 - **Enable local-model features:** `tune --memory` and/or `--thinking`; no flag = both.
   Patches the omp-config ConfigMap; running pods pick it up on next restart.
 
+## Platform-wide environment injection (omp-bootstrap-env)
+
+`omp-bootstrap-env` is a K8s Secret in `omp-system` that the operator copies into
+every session namespace at creation time. All key-value pairs become env vars in every
+session pod — injected after `omp-creds` (GSM vault) so GSM values take precedence.
+
+Use this for platform-level API keys that all sessions need, where the full GSM→ESO
+pipeline is overkill. **This is a workaround** — prefer `vault-add` for per-user or
+per-session credentials. The secret is stored as a plain K8s Secret with no rotation
+audit trail.
+
+**Inject a Gemini API key** so sessions start authenticated without `omp auth login`:
+
+```bash
+# Create (first time)
+kubectl create secret generic omp-bootstrap-env \
+  -n omp-system \
+  --from-literal=GEMINI_API_KEY=<your-key>
+
+# Update an existing secret
+kubectl create secret generic omp-bootstrap-env \
+  -n omp-system \
+  --from-literal=GEMINI_API_KEY=<new-key> \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+`GEMINI_API_KEY` matches the auto-obfuscation pattern (`KEY` suffix) — the model
+receives `#XXXX#`, never the raw value. Already-running sessions are unaffected;
+new sessions created after the secret exists pick it up automatically.
+
 ## Guardrails
 
 - `destroy` is irreversible — prompts for `yes`; surface the warning to the user before
