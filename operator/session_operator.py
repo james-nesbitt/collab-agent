@@ -483,12 +483,13 @@ def reconcile(spec, name, namespace, patch, logger, **_) -> None:
     # 3. PVC
     _create_or_skip(v1.create_namespaced_persistent_volume_claim, ns, _pvc(ns))
 
-    # 4. ExternalSecret
+    # 4. ExternalSecret — skip if no data entries (ESO rejects empty data/dataFrom)
     es = _external_secret(ns, subtrees, OMP_GSM_PROJECT)
     if not es["spec"]["data"]:
-        logger.warning("No GSM secrets matched subtrees %s for session %s", subtrees, name)
+        logger.warning("No GSM secrets matched subtrees %s for session %s; skipping ExternalSecret", subtrees, name)
         patch.status["message"] = "no credentials matched subtrees"
-    _apply_custom_object("external-secrets.io", "v1", ns, "externalsecrets", es)
+    else:
+        _apply_custom_object("external-secrets.io", "v1", ns, "externalsecrets", es)
 
     # 5. ConfigMap
     cm = _configmap_from_master(ns)
