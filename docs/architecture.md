@@ -264,7 +264,7 @@ A pod restart (crash / OOM / manual delete) keeps the Session CR alive. The oper
 re-captures the collab link from the restarted pod and updates `status.joinLink`;
 phase drops to `Running` during recapture and returns to `Hosting` once the link is
 refreshed. The PVC persists `$HOME` (auth tokens, `~/work`) across restarts.
-Deleting the CR (`kubectl delete session NAME -n omp-system`) fully reclaims all resources including the disk.
+Deleting the CR (`kubectl delete session NAME -n <namespace>`) fully reclaims all resources including the disk.
 
 During provisioning: `ExternalSecret` creation is skipped when `spec.subtrees` is empty (ESO rejects empty data); the operator copies `ghcr-pull-secret` and `omp-bootstrap-env` from `omp-system` into the session namespace if they are present.
 
@@ -278,7 +278,7 @@ During provisioning: `ExternalSecret` creation is skipped when `spec.subtrees` i
 | pod crash / OOM | K8s `restartPolicy: Always` | automatic restart; operator re-captures collab link; guests rejoin with new link |
 | operator crash | K8s Deployment restarts it | on resume, kopf `@kopf.on.resume` re-reconciles all existing Session CRs |
 | ESO sync failure | `ExternalSecret` status `SecretSyncError` | ESO retries; check GSM IAM or secret existence; `kubectl get externalsecret omp-creds -n omp-session-<name>`. Note: only applies when `spec.subtrees` is non-empty — empty subtrees skip ExternalSecret creation entirely. |
-| stale collab link after pod restart | `status.phase` = `Running` during recapture | annotate the Session CR (`kubectl annotate session NAME -n omp-system omp.mirantis.io/recapture=$(date +%s) --overwrite`); wait for `Hosting` |
+| stale collab link after pod restart | `status.phase` = `Running` during recapture | annotate the Session CR (`kubectl annotate session NAME -n <namespace> omp.mirantis.io/recapture=$(date +%s) --overwrite`); wait for `Hosting` |
 | guest write without token | host token verify fails | guest downgraded to read-only; no server-side change needed |
 | credential printed by a tool | value lands in `~/work/*.jsonl` and on guest screens | `RULES.md` forbids printing; rotate the leaked entry in GSM |
 | node failure | GKE node controller evicts pod; rescheduled | PVC re-attaches on new node within the same zone (zonal `standard-rwo` disk) |
@@ -300,10 +300,10 @@ During provisioning: `ExternalSecret` creation is skipped when `spec.subtrees` i
 | `administrator.sh vault-ls [SUBTREE]` | list GSM secret names for the vault (names only, never values) |
 | `kubectl apply` (Session CR in any namespace the operator watches; `omp-system` is conventional but any namespace works) | create Session CR; operator provisions namespace + PVC + pod; wait for `status.phase=Hosting` |
 | `kubectl exec -it -n omp-session-NAME omp -- bash -lc 'omp auth login'` | in-pod OAuth for interactive model auth; token persists on PVC |
-| `kubectl get session NAME -n omp-system -o jsonpath='{.status.joinLink}'` | print join link from Session CR status (use `status.viewLink` for read-only) |
+| `kubectl get session NAME -n <namespace> -o jsonpath='{.status.joinLink}'` | print join link from Session CR status (use `status.viewLink` for read-only) |
 | `kubectl exec -it -n omp-session-NAME omp -- tmux attach -t omp` | attach to session tmux |
 | `kubectl get sessions -A` | list all Session CRs (operator watches cluster-wide; use `-A` to find them in any namespace) |
-| `kubectl delete session NAME -n omp-system` | delete Session CR → GC namespace + PVC |
+| `kubectl delete session NAME -n <namespace>` | delete Session CR → GC namespace + PVC |
 | `omp join "<link>"` | from any user machine |
 
 ---
