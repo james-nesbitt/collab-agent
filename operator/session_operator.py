@@ -475,6 +475,10 @@ def _patch_cr_status(cr_namespace: str, cr_name: str, **fields) -> None:
 @kopf.on.startup()
 def configure(settings: kopf.OperatorSettings, **_) -> None:
     settings.persistence.finalizer = f"{GROUP}/finalizer"
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +609,39 @@ def delete(name, patch, logger, **_) -> None:
         if exc.status != 404:
             raise
         logger.info("Namespace %s already absent", ns)
+
+
+# ---------------------------------------------------------------------------
+# Recapture handler — re-run link capture when annotation is bumped
+# ---------------------------------------------------------------------------
+
+@kopf.on.field(GROUP, VERSION, PLURAL, field="metadata.annotations",
+               labels=None, when=lambda new, **_: "omp.mirantis.io/recapture" in (new or {}))
+def on_recapture(spec, name, namespace, logger, **_) -> None:
+    """
+    Re-capture the collab join/view link when the recapture annotation changes.
+    Used after manual omp auth login to surface the link without restarting the pod.
+    """
+    ns = f"omp-session-{name}"
+    view: bool = bool(spec.get("view", False))
+    logger.info("Recapture requested for session %s", name)
+
+    link = _capture_join_link(ns, view=view)
+    if not link:
+        logger.info("Link not found on first attempt; retrying in 15s")
+        time.sleep(15)
+        link = _capture_join_link(ns, view=view)
+
+    if link:
+        _patch_cr_status(namespace, name, phase="Hosting", joinLink=link,
+                         namespace=ns, podName="omp")
+        logger.info("Recaptured join link for session %s", name)
+        if not view:
+            view_link = _capture_join_link(ns, view=True)
+            if view_link:
+                _patch_cr_status(namespace, name, viewLink=view_link)
+    else:
+        logger.warning("Failed to recapture join link for session %s", name)
 
 
 # ---------------------------------------------------------------------------
