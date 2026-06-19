@@ -61,7 +61,13 @@ COPY platform/skills/mirantis-services/SKILL.md  /opt/omp/agent/skills/mirantis-
 COPY session-template/.omp/config.yml  /opt/omp/work-template/.omp/config.yml
 COPY session-template/.omp/AGENTS.md   /opt/omp/work-template/.omp/AGENTS.md
 
-RUN chown -R omp:omp /opt/omp
+RUN chown -R omp:omp /opt/omp && \
+    # Compile a standalone omp binary so it survives the PVC mount shadowing /home/omp
+    /home/omp/.local/bin/mise exec bun -- bun build \
+        --compile \
+        --outfile /usr/local/bin/omp \
+        /home/omp/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js && \
+    chmod 755 /usr/local/bin/omp
 
 # ── 7. Entrypoint ────────────────────────────────────────────────────────────
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh

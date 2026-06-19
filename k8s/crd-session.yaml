@@ -48,6 +48,13 @@ spec:
                   description: >-
                     Override session image; defaults to operator env
                     OMP_SESSION_IMAGE
+                env:
+                  type: object
+                  description: >-
+                    Extra environment variables injected into the session pod
+                    (e.g. GEMINI_API_KEY for bootstrap auth before Anthropic OAuth).
+                  additionalProperties:
+                    type: string
             status:
               type: object
               properties:

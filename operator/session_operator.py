@@ -237,7 +237,7 @@ def _network_policies(ns: str) -> list[dict]:
     ]
 
 
-def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_secret: bool = False) -> k8s.V1Pod:
+def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_secret: bool = False, extra_env: dict | None = None) -> k8s.V1Pod:
     """
     Build the session pod manifest.
 
@@ -254,6 +254,8 @@ def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_s
     env = [k8s.V1EnvVar(name="OMP_SESSION_NAME", value=session_name)]
     if OMP_RELAY:
         env.append(k8s.V1EnvVar(name="COLLAB_RELAY", value=OMP_RELAY))
+    for k, v in (extra_env or {}).items():
+        env.append(k8s.V1EnvVar(name=k, value=v))
 
     volume_mounts = [
         k8s.V1VolumeMount(name="omp-home", mount_path="/home/omp"),
@@ -488,6 +490,7 @@ def reconcile(spec, name, namespace, patch, logger, **_) -> None:
     subtrees: list = list(spec.get("subtrees", ["services"]))
     view: bool = bool(spec.get("view", False))
     image: str = spec.get("image") or OMP_SESSION_IMAGE
+    extra_env: dict = dict(spec.get("env", {}))
     ns: str = f"omp-session-{name}"
 
     _patch_cr_status(namespace, name, phase="Provisioning")
@@ -528,7 +531,7 @@ def reconcile(spec, name, namespace, patch, logger, **_) -> None:
         _apply_network_policy(ns, np)
 
     # 7. Pod
-    _create_or_skip(v1.create_namespaced_pod, ns, _pod(ns, name, image, has_cm, has_pull_secret))
+    _create_or_skip(v1.create_namespaced_pod, ns, _pod(ns, name, image, has_cm, has_pull_secret, extra_env))
 
     _patch_cr_status(namespace, name, phase="Running", namespace=ns, podName="omp")
     logger.info("Pod created in %s; waiting for Ready", ns)
