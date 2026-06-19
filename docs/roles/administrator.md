@@ -144,8 +144,19 @@ is not a secret.
   `get-credentials` call — useful when your kubeconfig has expired.
 - **Images.** Session and operator images are built and published to GHCR by the CI
   workflow (`.github/workflows/build-images.yml`); `administrator.sh` does not build or
-  push images. Set GHCR packages to **public** after the first CI push so GKE pulls
-  anonymously without an imagePullSecret (GitHub → repo → Packages → package settings).
+  push images. GHCR packages are currently **private**; the operator automatically copies
+  `ghcr-pull-secret` from `omp-system` into each session namespace so pods can pull
+  images. To remove this dependency, make the packages public on GitHub (repo → Packages →
+  package settings → Change visibility to Public) and delete the `ghcr-pull-secret` Secret
+  from `omp-system`.
+- **Bootstrap model credentials.** Create `omp-bootstrap-env` in `omp-system` with any
+  API keys needed for session startup (e.g. `GEMINI_API_KEY`). The operator copies this
+  Secret into every session namespace automatically. This allows sessions to start and
+  generate a join link before Anthropic OAuth is completed:
+  ```bash
+  kubectl create secret generic omp-bootstrap-env -n omp-system \
+    --from-literal=GEMINI_API_KEY=<key>
+  ```
 
 ## 6. Tearing it down
 

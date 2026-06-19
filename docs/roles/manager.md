@@ -33,9 +33,13 @@ spec:
 EOF
 ```
 
-This applies a `Session` CR to `omp-system`. The operator provisions an isolated
-namespace (`omp-session-work`), syncs the `services` subtree from GSM into a
-per-namespace Secret, and launches an `omp` pod.
+This applies a `Session` CR to the namespace specified in the manifest. The operator
+provisions an isolated namespace (`omp-session-work`), syncs the `services` subtree from
+GSM into a per-namespace Secret, and launches an `omp` pod.
+
+> **Namespace choice:** The Session CR can live in any namespace — `omp-system` and
+> `omp-sessions` are both conventional choices. Pick one and use it consistently across
+> all commands below.
 
 Want a different subtree — or multiple subtrees? Adjust `spec.subtrees`:
 
@@ -48,7 +52,7 @@ Wait for the session to be ready:
 
 ```bash
 kubectl wait --for=jsonpath='{.status.phase}'=Hosting \
-  session/work -n omp-system --timeout=180s
+  session/work -n <namespace> --timeout=180s
 ```
 
 No passphrase is prompted. Credentials are injected from the session's own namespace
@@ -56,12 +60,23 @@ Secret.
 
 ## 2. Authenticate the model (first time per session)
 
-Token-based providers (GitHub, Anthropic API key, etc.) are covered by vault storage.
-For OAuth-based model auth (Anthropic's interactive login), exec into the pod:
+If `omp-bootstrap-env` is present in `omp-system` (see the [administrator guide](administrator.md)),
+the operator copies it into the session namespace automatically. The session starts
+immediately and the join link appears in `.status.joinLink` — no manual auth step is
+required before joining. Once inside the session, complete Anthropic OAuth via the omp
+TUI or by typing `/auth login` in the agent pane.
+
+**Fallback — manual auth (no bootstrap env):**
 
 ```bash
-kubectl exec -it -n omp-session-work omp -- bash -lc 'omp auth login'
+kubectl exec -it -n omp-session-work omp -- bash
+# Inside the container:
+omp auth login
 ```
+
+> **Note:** `bash -lc 'omp auth login'` may not work if `omp` is not on `PATH` in the
+> pod's login shell — drop into an interactive `bash` session and run `omp auth login`
+> directly.
 
 The resulting token is written to `~/` on the pod's PVC (`omp-home`) and persists
 across pod restarts. You only need to do this once per session lifecycle.
@@ -74,20 +89,20 @@ across pod restarts. You only need to do this once per session lifecycle.
 ## 3. Share it
 
 ```bash
-kubectl get session work -n omp-system -o jsonpath='{.status.joinLink}'
+kubectl get session work -n <namespace> -o jsonpath='{.status.joinLink}'
 ```
 
 This prints the join link. Hand `omp join "<link>"` to your operators
 (see the [operator guide](operator.md)). For a read-only link:
 
 ```bash
-kubectl get session work -n omp-system -o jsonpath='{.status.viewLink}'
+kubectl get session work -n <namespace> -o jsonpath='{.status.viewLink}'
 ```
 
 If the link is empty (e.g. a pod just restarted), trigger a re-capture and wait ~30 s:
 
 ```bash
-kubectl annotate session work -n omp-system \
+kubectl annotate session work -n <namespace> \
   omp.mirantis.io/recapture=$(date +%s) --overwrite
 ```
 
@@ -98,10 +113,10 @@ kubectl annotate session work -n omp-system \
 kubectl exec -it -n omp-session-work omp -- tmux attach -t omp
 
 # List all sessions
-kubectl get sessions -n omp-system
+kubectl get sessions -A
 
 # Delete the session (operator GCs namespace + PVC)
-kubectl delete session work -n omp-system
+kubectl delete session work -n <namespace>
 ```
 
 To swap in new per-session skills: delete and re-create the session — assets are seeded
@@ -127,9 +142,10 @@ But guests are confined to that session's credentials.
 
 - **Session stuck waiting for `Hosting`.** Check the operator logs:
   `kubectl logs -n omp-system deploy/omp-operator`. Common causes: the `omp-creds`
-  ExternalSecret is not Valid (GSM labels mismatch or ESO ClusterSecretStore not ready —
-  re-run `./administrator.sh setup`), or the pod failed to start (image pull error —
-  `kubectl describe pod omp -n omp-session-NAME`).
+  ExternalSecret is not Valid (only applicable when `spec.subtrees` is non-empty; with
+  empty subtrees the ExternalSecret is skipped entirely — GSM labels mismatch or ESO
+  ClusterSecretStore not ready → re-run `./administrator.sh setup`), or the pod failed
+  to start (image pull error — `kubectl describe pod omp -n omp-session-NAME`).
 - **Collab link is empty.** The pod may have just restarted; trigger re-capture (above)
   and wait ~30 s. If still empty, exec into the session and check the omp pane directly.
 - **A var is missing / subtree exported nothing.** Check GSM labels:

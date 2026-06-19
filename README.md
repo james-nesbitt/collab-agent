@@ -40,6 +40,17 @@ printf '%s' "$GITHUB_TOKEN" | ./administrator.sh vault-add services/github/token
 ./administrator.sh vault-ls          # confirm
 ```
 
+### 2.5. Bootstrap model credentials (administrator, one-time)
+
+```bash
+kubectl create secret generic omp-bootstrap-env -n omp-system \
+  --from-literal=GEMINI_API_KEY=<key>
+```
+
+With this Secret in place the operator copies it into every session namespace
+automatically, allowing sessions to start and produce a join link before Anthropic
+OAuth is completed interactively.
+
 ### 3. Launch a session (manager)
 
 ```bash
@@ -48,13 +59,15 @@ apiVersion: omp.mirantis.io/v1alpha1
 kind: Session
 metadata:
   name: work
-  namespace: omp-system
+  namespace: omp-system  # Session CRs can live in any namespace; omp-system or omp-sessions are conventional
 spec:
   subtrees: ["services"]
   view: false
 EOF
 kubectl wait --for=jsonpath='{.status.phase}'=Hosting session/work -n omp-system --timeout=180s
-kubectl exec -it -n omp-session-work omp -- bash -lc 'omp auth login'  # Anthropic OAuth (persists on PVC)
+# Preferred: if omp-bootstrap-env is present (step 2.5) the session starts automatically
+# and the join link is ready — do Anthropic OAuth from inside via /auth login or the omp TUI.
+# Fallback (no bootstrap env): kubectl exec -it -n omp-session-work omp -- bash  then: omp auth login
 kubectl get session work -n omp-system -o jsonpath='{.status.joinLink}'  # prints join link
 ```
 
