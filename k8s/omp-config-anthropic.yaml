@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: omp-config-anthropic
+  namespace: omp-system
+data:
+  config.yml: |
+    # omp config profile: Anthropic Claude (ANTHROPIC_OAUTH_TOKEN / ANTHROPIC_API_KEY)
+    secrets:
+      enabled: true
+    modelRoles:
+      default: anthropic/claude-sonnet-4-6
+      plan: anthropic/claude-opus-4-8
+      slow: anthropic/claude-haiku-4-5
+      smol: anthropic/claude-haiku-4-5
+    todo:
+      eager: always
+    search:
+      contextBefore: 1
+      contextAfter: 1
+    readLineNumbers: true
+    lsp:
+      diagnosticsOnEdit: true
+    steeringMode: all
+    checkpoint:
+      enabled: true
+    async:
+      enabled: true
+    inspect_image:
+      enabled: true
+    task:
+      isolation:
+        mode: rcopy
+        merge: patch
+        commits: ai
+      maxConcurrency: 8
+      eager: default
+    mcp:
+      discoveryMode: true
+    symbolPreset: nerd
+    hideThinkingBlock: false

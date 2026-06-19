@@ -156,22 +156,23 @@ def _external_secret(ns: str, subtrees: list, project: str) -> dict:
     }
 
 
-def _configmap_from_master(ns: str) -> k8s.V1ConfigMap | None:
+def _configmap_from_master(ns: str, config_ref: str = "omp-config") -> k8s.V1ConfigMap | None:
     """
-    Copy the master omp-config ConfigMap from omp-system into the session
-    namespace so the pod picks up the operator-managed omp config.
-    Returns None (and logs a warning) if the master doesn't exist yet.
+    Copy a named ConfigMap from omp-system into the session namespace.
+
+    config_ref names the ConfigMap in omp-system to copy (default: omp-config).
+    Returns None (and logs a warning) if the named ConfigMap doesn't exist.
     """
     v1 = k8s.CoreV1Api()
     try:
-        master = v1.read_namespaced_config_map("omp-config", "omp-system")
+        master = v1.read_namespaced_config_map(config_ref, "omp-system")
         return k8s.V1ConfigMap(
             metadata=k8s.V1ObjectMeta(name="omp-config", namespace=ns),
             data=master.data,
         )
     except k8s.ApiException as exc:
         if exc.status == 404:
-            log.warning("omp-config not found in omp-system; session uses image defaults")
+            log.warning("%s not found in omp-system; session uses image defaults", config_ref)
             return None
         raise
 
@@ -504,6 +505,7 @@ def reconcile(spec, name, namespace, patch, logger, **_) -> None:
     subtrees: list = list(spec.get("subtrees", ["services"]))
     view: bool = bool(spec.get("view", False))
     image: str = spec.get("image") or OMP_SESSION_IMAGE
+    config_ref: str = spec.get("configRef", "omp-config")
     extra_env: dict = dict(spec.get("env", {}))
     ns: str = f"omp-session-{name}"
 
@@ -537,8 +539,7 @@ def reconcile(spec, name, namespace, patch, logger, **_) -> None:
     else:
         _apply_custom_object("external-secrets.io", "v1", ns, "externalsecrets", es)
 
-    # 5. ConfigMap
-    cm = _configmap_from_master(ns)
+    cm = _configmap_from_master(ns, config_ref)
     has_cm = cm is not None
     if cm:
         _create_or_skip(v1.create_namespaced_config_map, ns, cm)

@@ -55,6 +55,13 @@ spec:
                     (e.g. GEMINI_API_KEY for bootstrap auth before Anthropic OAuth).
                   additionalProperties:
                     type: string
+                configRef:
+                  type: string
+                  description: >-
+                    Name of a ConfigMap in omp-system to copy as omp-config
+                    into the session namespace. Defaults to "omp-config".
+                    Use named profiles (e.g. omp-config-gemini,
+                    omp-config-anthropic) to give sessions different model roles.
             status:
               type: object
               properties:
