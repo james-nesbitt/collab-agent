@@ -309,7 +309,12 @@ def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_s
                             secret_ref=k8s.V1SecretEnvSource(
                                 name="omp-creds", optional=True
                             )
-                        )
+                        ),
+                        k8s.V1EnvFromSource(
+                            secret_ref=k8s.V1SecretEnvSource(
+                                name="omp-bootstrap-env", optional=True
+                            )
+                        ),
                     ],
                     security_context=k8s.V1SecurityContext(
                         run_as_non_root=True,
@@ -361,8 +366,8 @@ def _apply_network_policy(ns: str, body: dict) -> None:
             raise
 
 
-def _copy_pull_secret(v1: k8s.CoreV1Api, ns: str, src_ns: str = "omp-system", secret_name: str = "ghcr-pull-secret") -> bool:
-    """Copy an imagePullSecret from src_ns into ns. Returns True if copied/already present, False if absent."""
+def _copy_secret(v1: k8s.CoreV1Api, ns: str, secret_name: str, src_ns: str = "omp-system") -> bool:
+    """Copy a Secret from src_ns into ns. Returns True if copied/already present, False if absent."""
     try:
         src = v1.read_namespaced_secret(secret_name, src_ns)
     except k8s.ApiException as exc:
@@ -504,10 +509,12 @@ def reconcile(spec, name, namespace, patch, logger, **_) -> None:
     # 2. ServiceAccount
     _create_or_skip(v1.create_namespaced_service_account, ns, _service_account(ns))
 
-    # 2b. Copy imagePullSecret if present in omp-system (transitional: until GHCR packages are public)
-    has_pull_secret = _copy_pull_secret(v1, ns)
+    # 2b. Copy secrets from omp-system that are present (gracefully absent if not yet created)
+    has_pull_secret = _copy_secret(v1, ns, "ghcr-pull-secret")
     if has_pull_secret:
         logger.info("Copied ghcr-pull-secret into %s", ns)
+    if _copy_secret(v1, ns, "omp-bootstrap-env"):
+        logger.info("Copied omp-bootstrap-env into %s", ns)
 
     # 3. PVC
     _create_or_skip(v1.create_namespaced_persistent_volume_claim, ns, _pvc(ns))
