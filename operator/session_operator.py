@@ -315,6 +315,11 @@ def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_s
                                 name="omp-bootstrap-env", optional=True
                             )
                         ),
+                        k8s.V1EnvFromSource(
+                            secret_ref=k8s.V1SecretEnvSource(
+                                name="anthropic-oauth", optional=True
+                            )
+                        ),
                     ],
                     security_context=k8s.V1SecurityContext(
                         run_as_non_root=True,
@@ -513,8 +518,9 @@ def reconcile(spec, name, namespace, patch, logger, **_) -> None:
     has_pull_secret = _copy_secret(v1, ns, "ghcr-pull-secret")
     if has_pull_secret:
         logger.info("Copied ghcr-pull-secret into %s", ns)
-    if _copy_secret(v1, ns, "omp-bootstrap-env"):
-        logger.info("Copied omp-bootstrap-env into %s", ns)
+    for secret_name in ("omp-bootstrap-env", "anthropic-oauth"):
+        if _copy_secret(v1, ns, secret_name):
+            logger.info("Copied %s into %s", secret_name, ns)
 
     # 3. PVC
     _create_or_skip(v1.create_namespaced_persistent_volume_claim, ns, _pvc(ns))

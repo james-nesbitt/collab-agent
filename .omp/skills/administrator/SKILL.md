@@ -87,6 +87,46 @@ kubectl create secret generic omp-bootstrap-env \
 receives `#XXXX#`, never the raw value. Already-running sessions are unaffected;
 new sessions created after the secret exists pick it up automatically.
 
+## Anthropic OAuth injection (anthropic-oauth)
+
+`anthropic-oauth` is a K8s Secret in `omp-system` copied into every session namespace
+at creation. It injects `ANTHROPIC_OAUTH_TOKEN` and `ANTHROPIC_REFRESH_TOKEN` as env
+vars — omp reads `ANTHROPIC_OAUTH_TOKEN` directly and bypasses the setup wizard.
+Both secrets are injected automatically; no session CR changes needed.
+
+Create from your local `~/.omp/agent/agent.db` (requires an active `omp auth login`
+on this machine):
+
+```bash
+./administrator.sh anthropic-login
+```
+
+If `anthropic-login` is not yet a subcommand, use the one-liner (value never printed):
+
+```bash
+python3 - ~/.omp/agent/agent.db omp-system <<'PY'
+import sqlite3, json, sys, subprocess
+db = sqlite3.connect(sys.argv[1])
+row = db.execute(
+    "SELECT data FROM auth_credentials WHERE provider='anthropic' "
+    "AND credential_type='oauth' AND disabled_cause IS NULL "
+    "ORDER BY updated_at DESC LIMIT 1"
+).fetchone()
+if not row: sys.exit("No active Anthropic credential — run: omp auth login anthropic")
+d = json.loads(row[0])
+ns = sys.argv[2]
+subprocess.run(["kubectl","create","secret","generic","anthropic-oauth",
+    "-n", ns,
+    f"--from-literal=ANTHROPIC_OAUTH_TOKEN={d['access']}",
+    f"--from-literal=ANTHROPIC_REFRESH_TOKEN={d['refresh']}",
+    "--dry-run=client","-o","yaml"], check=True, capture_output=False)
+PY | kubectl apply -f -
+```
+
+Access tokens expire in ~24 h. Rotate by re-running the command above after
+re-authenticating locally. Running sessions pick up the new token on next pod restart;
+new sessions get it immediately.
+
 ## Guardrails
 
 - `destroy` is irreversible — prompts for `yes`; surface the warning to the user before

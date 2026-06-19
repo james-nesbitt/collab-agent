@@ -51,7 +51,9 @@ kubectl wait --for=jsonpath='{.status.phase}'=Hosting \
 | List all sessions | `kubectl get sessions -n omp-system` |
 | Session status / phase | `kubectl get session NAME -n omp-system -o jsonpath='{.status.phase}'` |
 | Kill session (GCs namespace + PVC) | `kubectl delete session NAME -n omp-system` |
-| Anthropic OAuth inside pod | `kubectl exec -it -n omp-session-NAME omp -- bash -lc 'omp auth login'` |
+| Check auth state in pod | `kubectl exec -n omp-session-NAME omp -- bash -lc 'omp auth status 2>&1 \|\| true'` |
+| Override auth (Anthropic SSO) | `kubectl exec -it -n omp-session-NAME omp -- bash -lc 'omp auth login anthropic'` |
+| Skip setup wizard in tmux | `kubectl exec -n omp-session-NAME omp -- bash -lc 'tmux send-keys -t omp Escape Escape Escape'` |
 | Attach to session tmux | `kubectl exec -it -n omp-session-NAME omp -- tmux attach -t omp` |
 | Get collab join link | `kubectl get session NAME -n omp-system -o jsonpath='{.status.joinLink}'` |
 | Get view-only link | `kubectl get session NAME -n omp-system -o jsonpath='{.status.viewLink}'` |
@@ -62,20 +64,44 @@ kubectl wait --for=jsonpath='{.status.phase}'=Hosting \
 
 ## Workflows
 
-- **Launch and share:**
-  1. Apply Session CR (above); wait for Hosting.
-  2. Get link: `kubectl get session work -n omp-system -o jsonpath='{.status.joinLink}'`
+- **Launch and share (Gemini — zero-touch):**
+  1. Apply Session CR; wait for `Hosting`.
+  2. `kubectl get session work -n omp-system -o jsonpath='{.status.joinLink}'`
   3. Hand `omp join "<link>"` to operators.
 
-- **Token-based model auth:** store with `./administrator.sh vault-add model/anthropic/api-key`
-  and create session with `subtrees: ["services", "model"]`. The pod injects
-  `ANTHROPIC_API_KEY` — no OAuth login needed.
+- **Launch and share (Anthropic SSO):**
+  1. Apply Session CR; wait for `Running`.
+  2. Login inside the pod (device-code flow — browser not required in pod):
+     ```bash
+     kubectl exec -it -n omp-session-work omp -- bash -lc 'omp auth login anthropic'
+     ```
+     Complete the device-code flow in your browser. Token saves to PVC; survives restarts.
+  3. If omp is in the setup wizard, dismiss it first:
+     ```bash
+     kubectl exec -n omp-session-work omp -- bash -lc 'tmux send-keys -t omp Escape Escape Escape'
+     ```
+  4. Trigger collab link capture:
+     ```bash
+     kubectl annotate session work -n omp-system \
+       omp.mirantis.io/recapture=$(date +%s) --overwrite
+     sleep 15
+     kubectl get session work -n omp-system -o jsonpath='{.status.joinLink}'
+     ```
+  5. Hand the link to operators.
 
-- **Interactive OAuth login:** after session is Running/Hosting, `kubectl exec -it` into
-  the pod and run `omp auth login`. Token persists on the PVC across restarts.
+- **If collab link is empty** (pod just restarted or auth just completed): trigger
+  re-capture, wait ~15 s, then re-read `status.joinLink`. The operator sends `/collab`
+  to the tmux pane — omp must be at the chat prompt (not in the setup wizard) for this
+  to succeed.
 
-- **If collab link is empty** (pod just restarted): trigger re-capture annotation and
-  wait ~30 s, then re-read `status.joinLink`.
+- **Check what auth is active:**
+  ```bash
+  kubectl exec -n omp-session-NAME omp -- bash -lc '
+    echo "GEMINI_API_KEY set: $([ -n "$GEMINI_API_KEY" ] && echo yes || echo no)"
+    echo "ANTHROPIC_OAUTH_TOKEN set: $([ -n "$ANTHROPIC_OAUTH_TOKEN" ] && echo yes || echo no)"
+    echo "ANTHROPIC_REFRESH_TOKEN set: $([ -n "$ANTHROPIC_REFRESH_TOKEN" ] && echo yes || echo no)"
+  '
+  ```
 
 ## Troubleshooting
 
