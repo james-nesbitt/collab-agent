@@ -67,7 +67,11 @@ RUN chown -R omp:omp /opt/omp && \
         --compile \
         --outfile /usr/local/bin/omp \
         /home/omp/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js && \
-    chmod 755 /usr/local/bin/omp
+    chmod 755 /usr/local/bin/omp && \
+    # Copy pi_natives addon alongside the compiled binary; bun compiled binaries cannot
+    # embed native .node files and look in /usr/local/bin/ as one of their search paths
+    cp /home/omp/.bun/install/global/node_modules/@oh-my-pi/pi-natives-linux-x64/pi_natives.linux-x64-modern.node /usr/local/bin/ && \
+    cp /home/omp/.bun/install/global/node_modules/@oh-my-pi/pi-natives-linux-x64/pi_natives.linux-x64-baseline.node /usr/local/bin/
 
 # ── 7. Entrypoint ────────────────────────────────────────────────────────────
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
