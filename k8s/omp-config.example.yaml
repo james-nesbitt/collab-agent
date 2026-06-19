@@ -11,10 +11,10 @@ data:
     secrets:
       enabled: true
     modelRoles:
-      default: anthropic/claude-sonnet-4-6
-      plan: anthropic/claude-opus-4-8
-      slow: anthropic/claude-haiku-4-5
-      smol: anthropic/claude-haiku-4-5
+      default: google/gemini-3.1-pro-preview
+      plan: google/gemini-3.1-pro-preview
+      slow: google/gemini-1.5-pro
+      smol: google/gemini-1.5-flash
     todo:
       eager: always
     search:
