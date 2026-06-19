@@ -615,13 +615,18 @@ def delete(name, patch, logger, **_) -> None:
 # Recapture handler — re-run link capture when annotation is bumped
 # ---------------------------------------------------------------------------
 
-@kopf.on.field(GROUP, VERSION, PLURAL, field="metadata.annotations",
-               labels=None, when=lambda new, **_: "omp.mirantis.io/recapture" in (new or {}))
-def on_recapture(spec, name, namespace, logger, **_) -> None:
+@kopf.on.field(GROUP, VERSION, PLURAL, field="metadata.annotations")
+def on_recapture(spec, name, namespace, old, new, logger, **_) -> None:
     """
     Re-capture the collab join/view link when the recapture annotation changes.
     Used after manual omp auth login to surface the link without restarting the pod.
     """
+    RECAPTURE = "omp.mirantis.io/recapture"
+    old_val = (old or {}).get(RECAPTURE)
+    new_val = (new or {}).get(RECAPTURE)
+    if new_val is None or new_val == old_val:
+        return  # annotation absent or unchanged — not a recapture request
+
     ns = f"omp-session-{name}"
     view: bool = bool(spec.get("view", False))
     logger.info("Recapture requested for session %s", name)

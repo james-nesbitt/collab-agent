@@ -57,6 +57,8 @@ tmux new-session -d -s omp -x 220 -y 50 'exec omp'
 # credentials (env-var providers like GEMINI_API_KEY and ANTHROPIC_OAUTH_TOKEN
 # are usable but not pre-registered). Escape safely dismisses all steps; it is
 # a no-op at the chat prompt on subsequent starts.
-(sleep 15 && tmux send-keys -t omp Escape Escape Escape) &
+(sleep 15 && tmux send-keys -t omp Escape && sleep 3 \
+           && tmux send-keys -t omp Escape && sleep 3 \
+           && tmux send-keys -t omp Escape) &
 
 exec bash -c 'while tmux has-session -t omp 2>/dev/null; do sleep 5; done'
