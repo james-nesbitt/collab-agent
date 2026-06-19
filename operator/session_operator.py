@@ -237,7 +237,7 @@ def _network_policies(ns: str) -> list[dict]:
     ]
 
 
-def _pod(ns: str, session_name: str, image: str, has_configmap: bool) -> k8s.V1Pod:
+def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_secret: bool = False) -> k8s.V1Pod:
     """
     Build the session pod manifest.
 
@@ -280,11 +280,15 @@ def _pod(ns: str, session_name: str, image: str, has_configmap: bool) -> k8s.V1P
             )
         )
 
+    image_pull_secrets = (
+        [k8s.V1LocalObjectReference(name="ghcr-pull-secret")] if has_pull_secret else None
+    )
     return k8s.V1Pod(
         metadata=k8s.V1ObjectMeta(name="omp", namespace=ns),
         spec=k8s.V1PodSpec(
             service_account_name="omp-session",
             restart_policy="Always",
+            image_pull_secrets=image_pull_secrets,
             security_context=k8s.V1PodSecurityContext(
                 run_as_non_root=True,
                 run_as_user=1000,
@@ -353,6 +357,23 @@ def _apply_network_policy(ns: str, body: dict) -> None:
     except k8s.ApiException as exc:
         if exc.status != 409:
             raise
+
+
+def _copy_pull_secret(v1: k8s.CoreV1Api, ns: str, src_ns: str = "omp-system", secret_name: str = "ghcr-pull-secret") -> bool:
+    """Copy an imagePullSecret from src_ns into ns. Returns True if copied/already present, False if absent."""
+    try:
+        src = v1.read_namespaced_secret(secret_name, src_ns)
+    except k8s.ApiException as exc:
+        if exc.status == 404:
+            return False
+        raise
+    dst = k8s.V1Secret(
+        metadata=k8s.V1ObjectMeta(name=secret_name, namespace=ns),
+        type=src.type,
+        data=src.data,
+    )
+    _create_or_skip(v1.create_namespaced_secret, ns, dst)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -480,6 +501,11 @@ def reconcile(spec, name, namespace, patch, logger, **_) -> None:
     # 2. ServiceAccount
     _create_or_skip(v1.create_namespaced_service_account, ns, _service_account(ns))
 
+    # 2b. Copy imagePullSecret if present in omp-system (transitional: until GHCR packages are public)
+    has_pull_secret = _copy_pull_secret(v1, ns)
+    if has_pull_secret:
+        logger.info("Copied ghcr-pull-secret into %s", ns)
+
     # 3. PVC
     _create_or_skip(v1.create_namespaced_persistent_volume_claim, ns, _pvc(ns))
 
@@ -502,7 +528,7 @@ def reconcile(spec, name, namespace, patch, logger, **_) -> None:
         _apply_network_policy(ns, np)
 
     # 7. Pod
-    _create_or_skip(v1.create_namespaced_pod, ns, _pod(ns, name, image, has_cm))
+    _create_or_skip(v1.create_namespaced_pod, ns, _pod(ns, name, image, has_cm, has_pull_secret))
 
     _patch_cr_status(namespace, name, phase="Running", namespace=ns, podName="omp")
     logger.info("Pod created in %s; waiting for Ready", ns)

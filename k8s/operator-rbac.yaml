@@ -26,9 +26,9 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["create", "delete", "get", "list", "watch"]
-  # Within session namespaces (secrets managed exclusively by ESO — no operator access)
+  # Within session namespaces + read ghcr-pull-secret from omp-system
   - apiGroups: [""]
-    resources: ["pods", "pods/exec", "persistentvolumeclaims", "configmaps", "serviceaccounts"]
+    resources: ["pods", "pods/exec", "persistentvolumeclaims", "configmaps", "serviceaccounts", "secrets"]
     verbs: ["create", "get", "list", "watch", "delete", "update", "patch"]
   # NetworkPolicy
   - apiGroups: ["networking.k8s.io"]
