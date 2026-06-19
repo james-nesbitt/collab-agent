@@ -569,4 +569,4 @@ def delete(name, patch, logger, **_) -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    kopf.run()
+    kopf.run(clusterwide=True)
