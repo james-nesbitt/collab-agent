@@ -50,7 +50,7 @@ fi
 # Container lifetime = omp session lifetime.
 # pod restartPolicy:Always restarts the container if omp exits.
 cd "${HOME}/work"
-tmux new-session -d -s omp -x 220 -y 50 'exec omp'
+tmux new-session -d -s omp -x 220 -y 50 'exec omp --allow-home'
 
 # ── Auto-dismiss the first-run setup wizard ───────────────────────────────────
 # omp shows a 3-step wizard on a fresh PVC because agent.db has no registered
