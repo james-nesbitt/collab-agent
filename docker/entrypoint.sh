@@ -6,18 +6,19 @@ export PATH="${HOME}/.local/bin:${HOME}/.bun/bin:${PATH}"
 
 # ── Seed $HOME from PVC + baked assets ───────────────────────────────────────
 # PVC is source of truth for auth/workspace; image is source of truth for assets.
-mkdir -p "${HOME}/.omp/agent" "${HOME}/work"
+WORK_DIR="${HOME}/${OMP_SESSION_NAME}"
+mkdir -p "${HOME}/.omp/agent" "${WORK_DIR}"
 
 # Always overwrite baked assets (image is canonical for agent assets)
 cp -a /opt/omp/agent/. "${HOME}/.omp/agent/"
 
-# Seed work/.omp only if not already on PVC
-if [[ ! -d "${HOME}/work/.omp" ]]; then
-    cp -a /opt/omp/work-template/.omp "${HOME}/work/.omp"
+# Seed <session>/.omp only if not already on PVC
+if [[ ! -d "${WORK_DIR}/.omp" ]]; then
+    cp -a /opt/omp/work-template/.omp "${WORK_DIR}/.omp"
 fi
 
 # Render session name placeholder
-sed -i "s/__SESSION_NAME__/${OMP_SESSION_NAME}/g" "${HOME}/work/.omp/AGENTS.md"
+sed -i "s/__SESSION_NAME__/${OMP_SESSION_NAME}/g" "${WORK_DIR}/.omp/AGENTS.md"
 
 # ── Apply omp config from ConfigMap if present ───────────────────────────────
 if [[ -f /etc/omp/config.yml ]]; then
@@ -49,7 +50,7 @@ fi
 # ── Launch omp under tmux, block on session lifetime ─────────────────────────
 # Container lifetime = omp session lifetime.
 # pod restartPolicy:Always restarts the container if omp exits.
-cd "${HOME}/work"
+cd "${WORK_DIR}"
 tmux new-session -d -s omp -x 220 -y 50 'exec omp --allow-home'
 
 # ── Auto-dismiss the first-run setup wizard ───────────────────────────────────
