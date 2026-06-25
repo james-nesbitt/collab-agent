@@ -28,7 +28,7 @@ RUN groupmod -n omp ubuntu && \
 RUN echo 'omp:100000:65536' >> /etc/subuid && \
     echo 'omp:100000:65536' >> /etc/subgid
 
-# ── 4. Install mise + bun + omp (as user omp) ────────────────────────────────
+# ── 4. Install mise + bun + omp (as user omp) — bump to trigger rebuild: 2026-06-25 ──
 USER omp
 WORKDIR /home/omp
 
