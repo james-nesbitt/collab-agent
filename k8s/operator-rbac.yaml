@@ -1,0 +1,94 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: omp-system
+  labels:
+    app.kubernetes.io/managed-by: administrator.sh
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: omp-operator
+  namespace: omp-system
+  annotations:
+    iam.gke.io/gcp-service-account: "omp-operator@${GCP_PROJECT}.iam.gserviceaccount.com"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: omp-operator
+rules:
+  # Session CRD
+  - apiGroups: ["omp.mirantis.io"]
+    resources: ["sessions", "sessions/status"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # Namespace management
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  # Within session namespaces — write-only for secrets (copies of bootstrap env + pull secret);
+  # operator never reads omp-creds or any session credential secret
+  - apiGroups: [""]
+    resources: ["pods", "pods/exec", "persistentvolumeclaims", "configmaps", "serviceaccounts"]
+    verbs: ["create", "get", "list", "watch", "delete", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "update", "patch", "delete"]
+  # NetworkPolicy
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # ExternalSecret
+  - apiGroups: ["external-secrets.io"]
+    resources: ["externalsecrets"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # kopf: post events and leader-election leases
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch", "get", "list", "watch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # kopf: watch CRD changes to detect resource additions/removals at runtime
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: omp-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: omp-operator
+subjects:
+  - kind: ServiceAccount
+    name: omp-operator
+    namespace: omp-system
+---
+# Scoped Role: operator may read platform secrets from omp-system only
+# (omp-bootstrap-env, ghcr-pull-secret) — not session namespaces, not kube-system
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: omp-operator-system-secrets
+  namespace: omp-system
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: omp-operator-system-secrets
+  namespace: omp-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: omp-operator-system-secrets
+subjects:
+  - kind: ServiceAccount
+    name: omp-operator
+    namespace: omp-system

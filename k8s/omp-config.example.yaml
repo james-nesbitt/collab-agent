@@ -1,0 +1,43 @@
+# Example: omp-config ConfigMap shape — rendered and applied by administrator.sh setup
+# Do not apply this directly; use: ./administrator.sh setup
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: omp-config
+  namespace: omp-system
+data:
+  config.yml: |
+    # omp platform config — managed by administrator.sh setup/tune
+    secrets:
+      enabled: true
+    modelRoles:
+      default: google/gemini-3.1-pro-preview
+      plan: google/gemini-3.1-pro-preview
+      slow: google/gemini-1.5-pro
+      smol: google/gemini-1.5-flash
+    todo:
+      eager: always
+    search:
+      contextBefore: 1
+      contextAfter: 1
+    readLineNumbers: true
+    lsp:
+      diagnosticsOnEdit: true
+    steeringMode: all
+    checkpoint:
+      enabled: true
+    async:
+      enabled: true
+    inspect_image:
+      enabled: true
+    task:
+      isolation:
+        mode: rcopy
+        merge: patch
+        commits: ai
+      maxConcurrency: 8
+      eager: default
+    mcp:
+      discoveryMode: true
+    symbolPreset: nerd
+    hideThinkingBlock: false

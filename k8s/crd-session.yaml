@@ -1,0 +1,86 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sessions.omp.mirantis.io
+spec:
+  group: omp.mirantis.io
+  scope: Namespaced
+  names:
+    kind: Session
+    plural: sessions
+    singular: session
+    shortNames:
+      - sess
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: PHASE
+          jsonPath: .status.phase
+          type: string
+        - name: NAMESPACE
+          jsonPath: .status.namespace
+          type: string
+        - name: LINK
+          jsonPath: .status.joinLink
+          type: string
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                subtrees:
+                  type: array
+                  items:
+                    type: string
+                  default:
+                    - services
+                view:
+                  type: boolean
+                  default: false
+                image:
+                  type: string
+                  description: >-
+                    Override session image; defaults to operator env
+                    OMP_SESSION_IMAGE
+                env:
+                  type: object
+                  description: >-
+                    Extra environment variables injected into the session pod
+                    (e.g. GEMINI_API_KEY for bootstrap auth before Anthropic OAuth).
+                  additionalProperties:
+                    type: string
+                configRef:
+                  type: string
+                  description: >-
+                    Name of a ConfigMap in omp-system to copy as omp-config
+                    into the session namespace. Defaults to "omp-config".
+                    Use named profiles (e.g. omp-config-gemini,
+                    omp-config-anthropic) to give sessions different model roles.
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Provisioning
+                    - Running
+                    - Hosting
+                    - Failed
+                    - Terminating
+                namespace:
+                  type: string
+                podName:
+                  type: string
+                joinLink:
+                  type: string
+                viewLink:
+                  type: string
+                message:
+                  type: string

@@ -22,12 +22,12 @@ interrupt the agent; the host executes everything.
 
 ```mermaid
 graph LR
-  VM["omp on GCP VM<br/>(host: runs agent + tools)"]
+  POD["omp session pod<br/>(host: runs agent + tools)"]
   R["relay<br/>(my.omp.sh or self-hosted)"]
   A["you @ laptop<br/>omp join"]
   B["teammate @ other machine<br/>omp join"]
   C["anyone<br/>browser: my.omp.sh/#link"]
-  VM <-->|E2E-encrypted| R
+  POD <-->|E2E-encrypted| R
   R <--> A
   R <--> B
   R <--> C
@@ -144,13 +144,13 @@ relay; the key stays in the fragment.
 | `collab.relayUrl` | `wss://my.omp.sh` | Relay used by `/collab` when no relay is passed inline |
 | `collab.displayName` | OS username | Name shown to other participants |
 
-## Recommended setup for this VM
+## Recommended setup
 
-1. Launch the session on the VM: `./manager.sh new work` (runs omp under tmux).
-2. Share it from the laptop: `./manager.sh collab work` (or `./manager.sh collab work view` for read-only) prints the `omp join "<link>"` line.
-3. Hand the printed `omp join "<link>"` or `my.omp.sh/#<link>` URL to operators; attach yourself with `./manager.sh attach work`.
+1. Launch the session: apply a Session CR in omp-system (see the [manager guide](../roles/manager.md)).
+2. Share it: `kubectl get session work -n omp-system -o jsonpath='{.status.joinLink}'` (or `status.viewLink` for read-only) prints the `omp join "<link>"` line.
+3. Hand the printed `omp join "<link>"` or `my.omp.sh/#<link>` URL to operators; attach yourself with `kubectl exec -it -n omp-session-work omp -- tmux attach -t omp`.
 4. Benefits that fit the original goal:
-   - Agent, repo, toolchain, docker/podman all live on the always-on VM.
+   - Agent, repo, toolchain, docker/podman all live on the always-on session pod.
    - The session survives your laptop sleeping; collab lets others attach to the
      agent session (not just a mirrored terminal).
    - Guests need nothing installed (browser client) — just the link.
@@ -162,10 +162,8 @@ ciphertext, room ids, connection counts; the key never leaves the URL
 fragment). Acceptable to start with. To avoid the dependency entirely,
 `/collab <relay>` accepts a custom relay — the same VM could host one.
 
-## Implemented: laptop-side collab helper
+## Collab link retrieval
 
-`./manager.sh collab [NAME] [view]` SSHes into the VM, sends `/collab` (or
-`/collab view`) into the session's tmux pane, and prints the captured
-`omp join "<link>"`. Driving the interactive TUI under tmux was sufficient;
-the manual fallback is to attach (`./manager.sh attach`) and type
-`/collab` by hand.
+`kubectl get session NAME -n omp-system -o jsonpath='{.status.joinLink}'` reads the
+link from the Session CR status. The operator captures it via `pods/exec` after the
+pod starts, so no SSH or tmux steering is needed.

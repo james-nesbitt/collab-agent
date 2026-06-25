@@ -1,33 +1,47 @@
 #!/usr/bin/env bash
-# administrator.sh — administrator role: lifecycle of the omp-agent GCP instance.
+# administrator.sh — administrator role: GKE cluster lifecycle + IAM + platform config + vault.
 #
 # Usage:
 #   ./administrator.sh <subcommand> [args...]
 #
 # Subcommands:
-#   provision                Create the VM and reserve a static IP (run once)
-#   start                    Start the stopped instance
-#   stop                     Stop the running instance (disk persists)
-#   ssh [-- EXTRA_ARGS]      Open a plain SSH session on the instance
-#   bootstrap                Install tmux (system), mise + bun + omp (per-user).
-#                            Idempotent. Run once per OS-Login user.
-#   status                   Instance status and external IP
-#   ip                       Print the reserved static external IP
-#   destroy                  Tear down instance and static IP
+#   provision                Create the GKE cluster, GCP service accounts, and IAM
+#                            bindings (run once). Idempotent.
+#   bootstrap                Install platform runtime on the cluster: RBAC, ESO,
+#                            Session CRD, and the Session operator.
+#   credentials              Fetch kubectl credentials for the cluster.
+#   status                   Cluster summary + node + session list.
+#   destroy                  Delete the cluster, GCP SAs, and IAM bindings.
+#   setup                    Configure the ESO ClusterSecretStore, create/update the
+#                            master omp-config ConfigMap in omp-system (secrets.enabled,
+#                            modelRoles, portable tuning), and print SETUP_OK.
+#   vault-add ENTRY          Insert a credential into GCP Secret Manager (value read
+#                            from stdin, never echoed). Entry format: subtree/key/...
+#                            e.g.  printf '%s' "$TOK" | ./administrator.sh vault-add \
+#                            services/github/token
+#   vault-ls [SUBTREE]       List vault entry NAMES only (no values).
+#   tune [--memory] [--thinking]
+#                            Patch the master omp-config ConfigMap with opt-in tuning:
+#                            mnemopi long-term memory (--memory) and/or automatic
+#                            thinking-level selection (--thinking). No flag = both.
+#                            New sessions pick it up; running pods on next restart.
 #   help                     Show this help
 #
-# For omp platform config + tmux session management, see ./manager.sh.
+# Session lifecycle (new/login/attach/list/kill/collab) is handled directly with
+# kubectl; see the manager skill.
+#
+# Images are published to GHCR by CI (.github/workflows/build-images.yml).
 #
 # Configuration (override via environment):
-#   INSTANCE_NAME    (default: omp-agent)
-#   ZONE             (default: europe-west1-b)
-#   REGION           (default: europe-west1)
-#   MACHINE_TYPE     (default: e2-standard-4)        — only used by provision
-#   DISK_SIZE        (default: 200GB)                — only used by provision
-#   DISK_TYPE        (default: pd-balanced)          — only used by provision
-#   STATIC_IP_NAME   (default: omp-server-ip)
-#   FIREWALL_RULE    (default: allow-omp-server)     — legacy, cleaned on destroy
-#   USE_IAP          (default: true) — tunnel all SSH/SCP through IAP
+#   GCP_PROJECT        (default: tools-348616)
+#   ZONE               (default: europe-west1-b)
+#   REGION             (default: europe-west1)
+#   CLUSTER_NAME       (default: omp-cluster)
+#   NODE_MACHINE_TYPE  (default: e2-standard-4)
+#   ADMIN_GCP_ACCOUNT  (default: current gcloud account)
+#   OMP_REGISTRY       (default: ghcr.io/james-nesbitt/collab-agent)
+#   OMP_IMAGE_TAG      (default: latest)
+#   SUBTREE            (default: services) — vault subtree
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -39,255 +53,477 @@ LOG_TAG="admin"
 . "${SCRIPT_DIR}/lib/common.sh"
 
 # ---------------------------------------------------------------------------
-# Administrator-only configuration (provisioning)
+# Administrator-only configuration
 # ---------------------------------------------------------------------------
-MACHINE_TYPE="${MACHINE_TYPE:-e2-standard-4}"
-DISK_SIZE="${DISK_SIZE:-200GB}"
-DISK_TYPE="${DISK_TYPE:-pd-balanced}"
-STATIC_IP_NAME="${STATIC_IP_NAME:-omp-server-ip}"
-FIREWALL_RULE="${FIREWALL_RULE:-allow-omp-server}"
-IMAGE_FAMILY="ubuntu-2404-lts-amd64"
-IMAGE_PROJECT="ubuntu-os-cloud"
+NODE_MACHINE_TYPE="${NODE_MACHINE_TYPE:-e2-standard-4}"
+ADMIN_GCP_ACCOUNT="${ADMIN_GCP_ACCOUNT:-$(gcloud config get-value account 2>/dev/null)}"
+OMP_REGISTRY="${OMP_REGISTRY:-ghcr.io/james-nesbitt/collab-agent}"
+OMP_IMAGE_TAG="${OMP_IMAGE_TAG:-latest}"
+
+SUBTREE="${SUBTREE:-services}"
+SESSION_NS="omp-system"
+
+# GCP service account emails
+SA_ESO="omp-eso@${GCP_PROJECT}.iam.gserviceaccount.com"
+SA_OPERATOR="omp-operator@${GCP_PROJECT}.iam.gserviceaccount.com"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+# render <template-file> — envsubst the file to stdout using current env.
+render() {
+    local f="$1"
+    [[ -f "${f}" ]] || die "manifest not found: ${f}"
+    GCP_PROJECT="${GCP_PROJECT}" \
+    ZONE="${ZONE}" \
+    CLUSTER_NAME="${CLUSTER_NAME}" \
+    REGION="${REGION}" \
+    OMP_REGISTRY="${OMP_REGISTRY}" \
+    OMP_IMAGE_TAG="${OMP_IMAGE_TAG}" \
+        envsubst < "${f}"
+}
+
+# sa_exists <email> — return 0 if GCP SA exists.
+sa_exists() {
+    gcloud iam service-accounts describe "$1" \
+        --project="${GCP_PROJECT}" --format="value(email)" >/dev/null 2>&1
+}
+
+# Detect the served ESO API version (v1 or v1beta1).
+eso_api_version() {
+    local versions
+    versions=$(kubectl get crd externalsecrets.external-secrets.io \
+               -o jsonpath='{.spec.versions[*].name}' 2>/dev/null || echo "")
+    if echo "${versions}" | grep -qw "v1"; then
+        echo "external-secrets.io/v1"
+    else
+        echo "external-secrets.io/v1beta1"
+    fi
+}
+
+# Validate a session/subtree token (no shell metacharacters → safe to interpolate).
+valid_token() { [[ "$1" =~ ^[A-Za-z0-9_/-]+$ ]]; }
+
+# Build the omp config.yml content (base tuning block).
+_base_config_yml() {
+    cat <<'CONFIG'
+# omp platform config — managed by administrator.sh setup/tune
+secrets:
+  enabled: true
+modelRoles:
+  default: google/gemini-3.1-pro-preview
+  plan: google/gemini-3.1-pro-preview
+  slow: google/gemini-1.5-pro
+  smol: google/gemini-1.5-flash
+todo:
+  eager: always
+search:
+  contextBefore: 1
+  contextAfter: 1
+readLineNumbers: true
+lsp:
+  diagnosticsOnEdit: true
+steeringMode: all
+checkpoint:
+  enabled: true
+async:
+  enabled: true
+inspect_image:
+  enabled: true
+task:
+  isolation:
+    mode: rcopy
+    merge: patch
+    commits: ai
+  maxConcurrency: 8
+  eager: default
+mcp:
+  discoveryMode: true
+symbolPreset: nerd
+hideThinkingBlock: false
+CONFIG
+}
 
 # ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
 cmd_provision() {
     command -v gcloud >/dev/null || die "gcloud not found in PATH"
+    [[ -n "${ADMIN_GCP_ACCOUNT}" ]] || die "Could not determine admin GCP account. Set ADMIN_GCP_ACCOUNT."
 
-    info "Project  : ${GCP_PROJECT}"
-    info "Instance : ${INSTANCE_NAME}"
-    info "Zone     : ${ZONE}"
-    info "Machine  : ${MACHINE_TYPE}"
-    info "Disk     : ${DISK_SIZE} ${DISK_TYPE}"
+    info "Project       : ${GCP_PROJECT}"
+    info "Cluster       : ${CLUSTER_NAME}"
+    info "Zone          : ${ZONE}"
+    info "Machine       : ${NODE_MACHINE_TYPE}"
+    info "Admin account : ${ADMIN_GCP_ACCOUNT}"
 
-    # 1. Reserve static external IP
-    if resource_exists "compute addresses" "${STATIC_IP_NAME}" --region="${REGION}"; then
-        warn "Static IP '${STATIC_IP_NAME}' already exists — skipping."
+    # 1. Enable required APIs
+    info "Enabling GCP APIs…"
+    gcloud services enable \
+        container.googleapis.com \
+        secretmanager.googleapis.com \
+        --project="${GCP_PROJECT}" --quiet
+
+    # 2. GKE cluster
+    if resource_exists "container clusters" "${CLUSTER_NAME}" --zone="${ZONE}"; then
+        warn "Cluster '${CLUSTER_NAME}' already exists — skipping."
     else
-        info "Reserving static IP '${STATIC_IP_NAME}' in region ${REGION}…"
-        gcloud compute addresses create "${STATIC_IP_NAME}" \
-            --project="${GCP_PROJECT}" \
-            --region="${REGION}" \
-            --network-tier=PREMIUM
-        ok "Static IP reserved."
-    fi
-
-    local static_ip
-    static_ip=$(get_static_ip)
-    info "Static IP: ${static_ip}"
-
-    # 2. Create VM
-    if resource_exists "compute instances" "${INSTANCE_NAME}" --zone="${ZONE}"; then
-        warn "Instance '${INSTANCE_NAME}' already exists — skipping VM creation."
-    else
-        info "Creating instance '${INSTANCE_NAME}'…"
-        gcloud compute instances create "${INSTANCE_NAME}" \
+        info "Creating GKE cluster '${CLUSTER_NAME}'…"
+        gcloud container clusters create "${CLUSTER_NAME}" \
             --project="${GCP_PROJECT}" \
             --zone="${ZONE}" \
-            --machine-type="${MACHINE_TYPE}" \
-            --boot-disk-size="${DISK_SIZE}" \
-            --boot-disk-type="${DISK_TYPE}" \
-            --image-family="${IMAGE_FAMILY}" \
-            --image-project="${IMAGE_PROJECT}" \
-            --address="${static_ip}" \
-            --network-tier=PREMIUM \
-            --metadata="enable-oslogin=TRUE" \
-            --scopes=default
-        ok "Instance created."
+            --num-nodes=3 \
+            --machine-type="${NODE_MACHINE_TYPE}" \
+            --image-type=UBUNTU_CONTAINERD \
+            --enable-dataplane-v2 \
+            --workload-pool="${GCP_PROJECT}.svc.id.goog" \
+            --no-enable-basic-auth \
+            --no-issue-client-certificate \
+            --release-channel=regular \
+            --quiet
+        ok "Cluster created."
+    fi
+
+    # 3. GCP service accounts
+    if sa_exists "${SA_ESO}"; then
+        warn "SA '${SA_ESO}' already exists — skipping."
+    else
+        info "Creating GCP SA for ESO (value reader)…"
+        gcloud iam service-accounts create omp-eso \
+            --project="${GCP_PROJECT}" \
+            --description="ESO: reads GSM secret values for session namespaces" \
+            --display-name="omp-eso"
+        ok "SA omp-eso created."
+    fi
+
+    if sa_exists "${SA_OPERATOR}"; then
+        warn "SA '${SA_OPERATOR}' already exists — skipping."
+    else
+        info "Creating GCP SA for operator (metadata viewer)…"
+        gcloud iam service-accounts create omp-operator \
+            --project="${GCP_PROJECT}" \
+            --description="Session operator: lists GSM secret metadata" \
+            --display-name="omp-operator"
+        ok "SA omp-operator created."
+    fi
+
+    # 4. IAM roles — operator gets project-level viewer (metadata only);
+    #    ESO gets per-secret secretAccessor granted by vault-add (not project-wide).
+    info "Binding IAM roles…"
+    gcloud projects add-iam-policy-binding "${GCP_PROJECT}" \
+        --member="serviceAccount:${SA_OPERATOR}" \
+        --role="roles/secretmanager.viewer" \
+        --quiet
+
+    # 5. Workload Identity bindings
+    info "Binding Workload Identity for ESO…"
+    gcloud iam service-accounts add-iam-policy-binding "${SA_ESO}" \
+        --project="${GCP_PROJECT}" \
+        --role="roles/iam.workloadIdentityUser" \
+        --member="serviceAccount:${GCP_PROJECT}.svc.id.goog[external-secrets/external-secrets]" \
+        --quiet
+
+    info "Binding Workload Identity for operator…"
+    gcloud iam service-accounts add-iam-policy-binding "${SA_OPERATOR}" \
+        --project="${GCP_PROJECT}" \
+        --role="roles/iam.workloadIdentityUser" \
+        --member="serviceAccount:${GCP_PROJECT}.svc.id.goog[omp-system/omp-operator]" \
+        --quiet
+
+    # 6. Grant cluster access to admin account only; refuse if allUsers/allAuthenticatedUsers found
+    info "Granting container.admin to ${ADMIN_GCP_ACCOUNT}…"
+    gcloud projects add-iam-policy-binding "${GCP_PROJECT}" \
+        --member="user:${ADMIN_GCP_ACCOUNT}" \
+        --role="roles/container.admin" \
+        --quiet
+
+    # Paranoia check: refuse broad IAM on container resources
+    local policy
+    policy=$(gcloud projects get-iam-policy "${GCP_PROJECT}" --format=json 2>/dev/null)
+    if echo "${policy}" | grep -qE '"allUsers"|"allAuthenticatedUsers"'; then
+        die "SECURITY: project IAM contains allUsers or allAuthenticatedUsers bindings. Inspect and remove before continuing."
     fi
 
     echo ""
     echo "============================================================"
     echo "  Provisioning complete"
     echo "============================================================"
-    echo "  Instance  : ${INSTANCE_NAME}"
-    echo "  Zone      : ${ZONE}"
-    echo "  Static IP : ${static_ip}"
+    echo "  Cluster  : ${CLUSTER_NAME}"
+    echo "  Zone     : ${ZONE}"
     echo ""
     echo "  Next steps:"
     echo "    ./administrator.sh bootstrap"
-    echo "    ./manager.sh setup"
-    echo "    ./manager.sh new work"
+    echo "    ./administrator.sh setup"
     echo "============================================================"
 }
 
-cmd_start() {
-    local status
-    status=$(instance_status)
-    if [[ "${status}" == "RUNNING" ]]; then
-        info "Instance is already running."
-        return
-    fi
-    info "Starting instance '${INSTANCE_NAME}'…"
-    gcloud compute instances start "${INSTANCE_NAME}" \
-        --project="${GCP_PROJECT}" \
-        --zone="${ZONE}"
-    info "Instance started. External IP: $(get_static_ip)"
-}
-
-cmd_stop() {
-    local status
-    status=$(instance_status)
-    if [[ "${status}" == "TERMINATED" ]]; then
-        info "Instance is already stopped."
-        return
-    fi
-    info "Stopping instance '${INSTANCE_NAME}'…"
-    gcloud compute instances stop "${INSTANCE_NAME}" \
-        --project="${GCP_PROJECT}" \
-        --zone="${ZONE}"
-    info "Instance stopped."
-}
-
-cmd_ssh() {
-    require_running
-    exec gcloud compute ssh "${INSTANCE_NAME}" \
-        --project="${GCP_PROJECT}" \
-        --zone="${ZONE}" \
-        $(iap_flag) \
-        "$@"
-}
-
 cmd_bootstrap() {
-    require_running
-    info "Bootstrapping tmux/mise/bun/omp on instance for SSH user…"
-    # Heredoc-streamed installer that runs as whoever SSHs in (OS Login user).
-    # System tmux is sudo'd; mise/bun/omp install into the user's $HOME.
-    gssh -- 'bash -s' << 'BOOTSTRAP'
-set -e
-echo "[bootstrap] user: $(whoami)"
+    command -v kubectl >/dev/null || die "kubectl not found in PATH"
+    command -v helm    >/dev/null || die "helm not found in PATH"
 
-# tmux (system) + rootless-podman runtime deps
-# - podman: container runtime
-# - slirp4netns: rootless networking
-# - fuse-overlayfs: rootless overlay storage driver
-# - uidmap: newuidmap/newgidmap binaries used by user namespaces
-missing=()
-for pkg in tmux curl unzip git podman slirp4netns fuse-overlayfs uidmap; do
-    dpkg -s "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
-done
-if [ ${#missing[@]} -gt 0 ]; then
-    sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}"
-fi
+    info "Fetching cluster credentials…"
+    cmd_credentials
 
-# /etc/subuid + /etc/subgid: rootless podman needs a UID/GID range for the
-# current user. OS Login creates users dynamically without these, so add them
-# idempotently. Range start is offset by 100000 per existing entry to avoid
-# overlap with the default 'ubuntu' user.
-me=$(whoami)
-if ! grep -q "^${me}:" /etc/subuid; then
-    start=$(( 100000 + 65536 * ($(wc -l < /etc/subuid) + 1) ))
-    sudo usermod --add-subuids ${start}-$((start + 65535)) \
-                 --add-subgids ${start}-$((start + 65535)) "${me}"
-    # Tell podman to rebuild its rootless storage with the new IDs.
-    podman system migrate >/dev/null 2>&1 || true
-fi
+    # 1. RBAC: bind admin account to cluster-admin
+    info "Binding ${ADMIN_GCP_ACCOUNT} to cluster-admin…"
+    kubectl create clusterrolebinding omp-admin \
+        --clusterrole=cluster-admin \
+        --user="${ADMIN_GCP_ACCOUNT}" \
+        --dry-run=client -o yaml | kubectl apply -f -
 
-# docker group: add user so docker CLI works without sudo.
-# The group is created by Docker CE at install time.
-if getent group docker >/dev/null && ! id -nG "${me}" | grep -qw docker; then
-    sudo usermod -aG docker "${me}"
-fi
+    # 2. External Secrets Operator via Helm
+    info "Installing External Secrets Operator…"
+    helm repo add external-secrets https://charts.external-secrets.io --force-update
+    helm upgrade --install external-secrets external-secrets/external-secrets \
+        -n external-secrets --create-namespace \
+        --set installCRDs=true \
+        --set "serviceAccount.annotations.iam\\.gke\\.io/gcp-service-account=${SA_ESO}" \
+        --wait
 
-# mise (user)
-if [ ! -x ~/.local/bin/mise ]; then
-  curl -fsSL https://mise.run | sh
-fi
+    # 3. Apply CRD, RBAC, operator Deployment (envsubst rendered)
+    info "Applying Session CRD…"
+    render "${SCRIPT_DIR}/k8s/crd-session.yaml" | kubectl apply -f -
 
-# PATH wiring — covers login (~/.profile), interactive (~/.bashrc),
-# and tmux-spawned non-login shells (PATH is inherited from the parent).
-grep -q '.bun/bin' ~/.profile 2>/dev/null || cat >> ~/.profile <<'PRF'
+    info "Applying operator RBAC…"
+    render "${SCRIPT_DIR}/k8s/operator-rbac.yaml" | kubectl apply -f -
 
-# mise + bun PATH
-export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
-eval "$(~/.local/bin/mise activate bash --shims)" 2>/dev/null || true
-PRF
-grep -q 'mise activate' ~/.bashrc 2>/dev/null || \
-  echo 'eval "$(~/.local/bin/mise activate bash)"' >> ~/.bashrc
+    info "Applying operator Deployment…"
+    render "${SCRIPT_DIR}/k8s/operator-deploy.yaml" | kubectl apply -f -
 
-# bun via mise
-~/.local/bin/mise use -g bun@latest >/dev/null
+    # 4. Wait for operator + ESO to be Available
+    info "Waiting for operator to be Available…"
+    kubectl rollout status deployment/omp-operator -n omp-system --timeout=120s
+    info "Waiting for ESO to be Available…"
+    kubectl rollout status deployment/external-secrets -n external-secrets --timeout=120s
 
-# omp via bun
-~/.local/bin/mise exec bun -- bun install -g @oh-my-pi/pi-coding-agent
+    echo ""
+    echo "BOOTSTRAP_OK"
+    echo "  ESO running in ns external-secrets"
+    echo "  Session operator running in ns omp-system"
+    echo ""
+    echo "  Next: ./administrator.sh setup"
+}
 
-echo ""
-echo "[bootstrap] versions:"
-tmux -V
-~/.local/bin/mise --version
-~/.local/bin/mise exec bun -- bun --version
-PATH="$HOME/.bun/bin:$PATH" ~/.local/bin/mise exec bun -- omp --version
-BOOTSTRAP
-    info "Bootstrap complete. Run: ./manager.sh setup, then ./manager.sh new work"
+cmd_credentials() {
+    info "Fetching kubectl credentials for cluster '${CLUSTER_NAME}'…"
+    gcloud container clusters get-credentials "${CLUSTER_NAME}" \
+        --zone="${ZONE}" \
+        --project="${GCP_PROJECT}"
+    ok "kubectl context: gke_${GCP_PROJECT}_${ZONE}_${CLUSTER_NAME}"
 }
 
 cmd_status() {
-    local status external_ip
-    status=$(instance_status)
-    external_ip=$(get_static_ip)
-
-    echo "Instance  : ${INSTANCE_NAME}"
-    echo "Zone      : ${ZONE}"
-    echo "Status    : ${status}"
-    echo "Static IP : ${external_ip:-<not reserved>}"
-
-    if [[ "${status}" == "RUNNING" ]]; then
-        echo ""
-        echo "Configure omp + manage tmux sessions with: ./manager.sh"
-    fi
-}
-
-cmd_ip() {
-    local ip
-    ip=$(get_static_ip)
-    [[ -z "${ip}" ]] && die "Static IP '${STATIC_IP_NAME}' not found."
-    echo "${ip}"
+    require_cluster
+    cmd_credentials >/dev/null 2>&1 || true
+    info "Cluster:"
+    gcloud container clusters describe "${CLUSTER_NAME}" \
+        --zone="${ZONE}" \
+        --project="${GCP_PROJECT}" \
+        --format="table(name,status,currentNodeCount,currentMasterVersion)"
+    echo ""
+    info "Nodes:"
+    kctl get nodes -o wide
+    echo ""
+    info "Sessions:"
+    kctl get sessions -n omp-system 2>/dev/null || echo "  (no sessions)"
 }
 
 cmd_destroy() {
     echo ""
     echo "WARNING: This will permanently delete:"
-    echo "  - Instance    : ${INSTANCE_NAME} (${ZONE})"
-    echo "  - Static IP   : ${STATIC_IP_NAME} (${REGION})"
-    echo "  - Firewall    : ${FIREWALL_RULE} (legacy, if present)"
+    echo "  - GKE cluster  : ${CLUSTER_NAME} (${ZONE})"
+    echo "  - GCP SA       : ${SA_ESO}"
+    echo "  - GCP SA       : ${SA_OPERATOR}"
+    echo "  - IAM bindings for both SAs"
     echo ""
     read -r -p "Type 'yes' to confirm: " confirm
     [[ "${confirm}" == "yes" ]] || { info "Aborted."; exit 0; }
 
-    local status
-    status=$(instance_status)
-    if [[ "${status}" != "NOT_FOUND" ]]; then
-        info "Deleting instance '${INSTANCE_NAME}'…"
-        gcloud compute instances delete "${INSTANCE_NAME}" \
+    if resource_exists "container clusters" "${CLUSTER_NAME}" --zone="${ZONE}"; then
+        info "Deleting cluster '${CLUSTER_NAME}'…"
+        gcloud container clusters delete "${CLUSTER_NAME}" \
             --project="${GCP_PROJECT}" \
             --zone="${ZONE}" \
             --quiet
     else
-        info "Instance not found — skipping."
+        info "Cluster not found — skipping."
     fi
 
-    if resource_exists "compute addresses" "${STATIC_IP_NAME}" --region="${REGION}"; then
-        info "Releasing static IP '${STATIC_IP_NAME}'…"
-        gcloud compute addresses delete "${STATIC_IP_NAME}" \
+    for sa in "${SA_ESO}" "${SA_OPERATOR}"; do
+        if sa_exists "${sa}"; then
+            info "Deleting GCP SA '${sa}'…"
+            gcloud iam service-accounts delete "${sa}" \
+                --project="${GCP_PROJECT}" \
+                --quiet || warn "SA delete failed for ${sa} (may have already been removed)"
+        else
+            info "SA '${sa}' not found — skipping."
+        fi
+    done
+
+    ok "Destroy complete."
+}
+
+cmd_setup() {
+    require_cluster
+
+    # Fetch credentials if not already configured
+    gcloud container clusters get-credentials "${CLUSTER_NAME}" \
+        --zone="${ZONE}" --project="${GCP_PROJECT}" >/dev/null 2>&1
+
+    # 1. Render + apply ClusterSecretStore (detect ESO API version)
+    info "Detecting ESO API version…"
+    local eso_ver
+    eso_ver=$(eso_api_version)
+    info "ESO API version: ${eso_ver}"
+
+    info "Applying ClusterSecretStore omp-gsm…"
+    GCP_PROJECT="${GCP_PROJECT}" \
+    ZONE="${ZONE}" \
+    CLUSTER_NAME="${CLUSTER_NAME}" \
+        envsubst < "${SCRIPT_DIR}/k8s/clustersecretstore.yaml" \
+        | sed "s|external-secrets.io/v1\b|${eso_ver}|g" \
+        | kubectl apply -f -
+
+    # 2. Create/patch the master omp-config ConfigMap in omp-system
+    info "Creating/updating omp-config ConfigMap in ${SESSION_NS}…"
+    local config_yml
+    config_yml=$(_base_config_yml)
+
+    kubectl create configmap omp-config \
+        --namespace="${SESSION_NS}" \
+        --from-literal="config.yml=${config_yml}" \
+        --dry-run=client -o yaml \
+        | kubectl apply -f -
+
+    echo ""
+    echo "SETUP_OK"
+    echo "  ClusterSecretStore: omp-gsm (${eso_ver})"
+    echo "  ConfigMap omp-config in ${SESSION_NS}"
+    echo ""
+    echo "  Vault:    printf '%s' \"\$VAL\" | ./administrator.sh vault-add services/my/key"
+    echo "  Tune:     ./administrator.sh tune [--memory] [--thinking]"
+    echo "  Sessions: see the manager skill for direct kubectl session management"
+}
+
+cmd_tune() {
+    local do_memory=false do_thinking=false
+    if [[ $# -eq 0 ]]; then
+        do_memory=true; do_thinking=true
+    fi
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --memory)   do_memory=true; shift ;;
+            --thinking) do_thinking=true; shift ;;
+            *) die "Unknown tune option: $1 (use --memory and/or --thinking)" ;;
+        esac
+    done
+
+    require_cluster
+
+    # Read the current config, patch it, and re-apply.
+    local current_config
+    current_config=$(kctl get configmap omp-config -n "${SESSION_NS}" \
+                     -o jsonpath='{.data.config\.yml}' 2>/dev/null || echo "")
+    [[ -n "${current_config}" ]] || current_config=$(_base_config_yml)
+
+    local patched_config="${current_config}"
+
+    if [[ "${do_memory}" == true ]]; then
+        info "Adding mnemopi long-term memory tuning…"
+        patched_config="${patched_config}
+memory:
+  backend: mnemopi
+mnemopi:
+  scoping: per-project-tagged
+  noEmbeddings: true
+  llmMode: smol
+providers:
+  memoryModel: qwen3-1.7b
+memories:
+  minRolloutIdleHours: 6
+  maxRolloutAgeDays: 30
+  summaryInjectionTokenLimit: 5000"
+        ok "memory.backend=mnemopi"
+    fi
+
+    if [[ "${do_thinking}" == true ]]; then
+        info "Adding automatic thinking-level tuning…"
+        patched_config="${patched_config}
+defaultThinkingLevel: auto
+providers:
+  autoThinkingModel: qwen3-1.7b"
+        ok "defaultThinkingLevel=auto"
+    fi
+
+    kubectl create configmap omp-config \
+        --namespace="${SESSION_NS}" \
+        --from-literal="config.yml=${patched_config}" \
+        --dry-run=client -o yaml \
+        | kctl apply -f -
+
+    echo ""
+    echo "TUNE_OK"
+    echo "  Note: running pods pick up the new config on next restart."
+}
+
+cmd_vault_add() {
+    local entry="${1:-}"
+    [[ -n "${entry}" ]] || die "Usage: ./administrator.sh vault-add ENTRY   (value on stdin)"
+    valid_token "${entry}" || die "Invalid entry name: ${entry}"
+
+    # Derive GSM secret id and subtree label from the entry path.
+    local subtree="${entry%%/*}"
+    local gsm_id; gsm_id=$(printf '%s' "${entry}" | tr '/' '-')
+    local sublabel; sublabel=$(printf '%s' "${subtree}" | tr '/' '-')
+
+    # Read value from stdin; never echo it.
+    local value
+    value=$(cat)
+    [[ -n "${value}" ]] || die "Empty value on stdin for entry: ${entry}"
+
+    # Create the GSM secret if it doesn't exist yet.
+    if ! gcloud secrets describe "${gsm_id}" --project="${GCP_PROJECT}" >/dev/null 2>&1; then
+        info "Creating GSM secret '${gsm_id}'…"
+        gcloud secrets create "${gsm_id}" \
             --project="${GCP_PROJECT}" \
-            --region="${REGION}" \
+            --replication-policy=automatic \
+            --labels="omp_vault=true,omp_subtree=${sublabel}" \
             --quiet
-    else
-        info "Static IP not found — skipping."
     fi
 
-    if resource_exists "compute firewall-rules" "${FIREWALL_RULE}"; then
-        info "Deleting firewall rule '${FIREWALL_RULE}'…"
-        gcloud compute firewall-rules delete "${FIREWALL_RULE}" \
+    # Add a new version with the value piped via --data-file=- (never in argv).
+    info "Adding new version for '${gsm_id}'…"
+    printf '%s' "${value}" \
+        | gcloud secrets versions add "${gsm_id}" \
             --project="${GCP_PROJECT}" \
+            --data-file=- \
             --quiet
-    else
-        info "Firewall rule not found — skipping."
+
+    # Grant ESO SA secretAccessor on this specific secret only (not project-wide).
+    info "Granting ESO secretAccessor on '${gsm_id}'…"
+    gcloud secrets add-iam-policy-binding "${gsm_id}" \
+        --project="${GCP_PROJECT}" \
+        --member="serviceAccount:${SA_ESO}" \
+        --role="roles/secretmanager.secretAccessor" \
+        --quiet
+
+    ok "ADDED ${entry}"
+}
+
+cmd_vault_ls() {
+    local subtree="${1:-}"
+    [[ -z "${subtree}" ]] || valid_token "${subtree}" || die "Invalid subtree: ${subtree}"
+
+    local filter="labels.omp_vault=true"
+    if [[ -n "${subtree}" ]]; then
+        local sublabel; sublabel=$(printf '%s' "${subtree}" | tr '/' '-')
+        filter+=" AND labels.omp_subtree=${sublabel}"
     fi
 
-    info "Destroy complete."
+    gcloud secrets list \
+        --project="${GCP_PROJECT}" \
+        --filter="${filter}" \
+        --format="value(name)"
 }
 
 cmd_help() {
@@ -302,13 +538,14 @@ shift 2>/dev/null || true
 
 case "${SUBCOMMAND}" in
     provision)      cmd_provision "$@" ;;
-    start)          cmd_start "$@" ;;
-    stop)           cmd_stop "$@" ;;
-    ssh)            cmd_ssh "$@" ;;
     bootstrap)      cmd_bootstrap "$@" ;;
+    credentials)    cmd_credentials "$@" ;;
     status)         cmd_status "$@" ;;
-    ip)             cmd_ip "$@" ;;
     destroy)        cmd_destroy "$@" ;;
+    setup)          cmd_setup "$@" ;;
+    tune)           cmd_tune "$@" ;;
+    vault-add)      cmd_vault_add "$@" ;;
+    vault-ls)       cmd_vault_ls "$@" ;;
     help|--help|-h) cmd_help ;;
     *)
         echo "Unknown subcommand: ${SUBCOMMAND}" >&2

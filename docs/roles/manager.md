@@ -1,189 +1,164 @@
 # Manager Guide
 
-You are the **manager**. You own omp on the VM: you configure the platform once, you
-hold the credentials, and you create and share the sessions people actually work in.
-You assume the [administrator](administrator.md) has already provisioned and
-bootstrapped the VM.
+You are the **manager**. You create and share the sessions people work in. You assume
+the [administrator](administrator.md) has already provisioned the GKE cluster, run
+`bootstrap` and `setup`, and stored the necessary credentials with `vault-add`.
 
-Everything you do goes through **`manager.sh`**, run from this repo on your laptop. It
-drives the VM over `gcloud ssh` + IAP — including the interactive omp TUI, which it
-steers with `tmux send-keys` / `capture-pane`.
+You manage sessions directly with **`kubectl`** — there is no manager script. All
+platform config and vault operations use `./administrator.sh`.
 
 ## Before you start
 
-- The administrator has run `./administrator.sh provision` and `bootstrap`, and the VM
-  is running (`./administrator.sh status` shows `RUNNING`).
-- That's it — you don't need anything installed beyond `gcloud`.
+- `kubectl` installed; cluster credentials fetched:
+  ```bash
+  gcloud container clusters get-credentials omp-cluster --zone=europe-west1-b
+  ```
+  Or: `./administrator.sh credentials`.
+- The cluster is up: `./administrator.sh status` shows `RUNNING` nodes and the operator
+  Deployment is Available.
+- No GPG key, no vault passphrase, no vault init.
 
-## 1. First time: configure the platform
-
-```bash
-./manager.sh setup
-```
-
-One idempotent command does several things:
-
-1. Turns on global secret obfuscation (`secrets.enabled`) so credential values are
-   replaced with `#XXXX#` before any text reaches the model.
-2. Ensures the credential vault exists at `~/.omp-vault` on the VM (a no-passphrase
-   `pass` store).
-3. Installs the global assets into `~/.omp/agent/` so every session inherits them: the
-   context (`AGENTS.md`), always-apply rules (`RULES.md` plus five behaviour/safety rule
-   files under `rules/`), the `commit-push-pr` command, secret-shape patterns
-   (`secrets.yml`), and the `credential-access` + `mirantis-services` skills.
-4. Applies portable agent tuning via `omp config set` — editor/task defaults plus
-   `modelRoles` (default `claude-sonnet-4-6`, plan `claude-opus-4-8`, slow + smol
-   `claude-haiku-4-5`; all Anthropic models the VM is already authenticated for).
-
-You'll see `SETUP_OK` and the installed asset paths. Re-run it any time you change
-the files under `platform/` — it just overwrites them.
-
-### Optional: protect the vault with a passphrase
-
-By default the vault key has no passphrase (Tier-1: any in-session participant can
-decrypt). For protection against disk theft or other VM users, run:
+## 1. Launch a session
 
 ```bash
-./manager.sh setup --passphrase
+kubectl apply -f - <<EOF
+apiVersion: omp.mirantis.io/v1alpha1
+kind: Session
+metadata:
+  name: work
+  namespace: omp-system
+spec:
+  subtrees: ["services"]
+  view: false
+EOF
 ```
 
-You'll be prompted for a passphrase (twice). The vault key is then passphrase-protected.
-From then on, `./manager.sh new` prompts you for the passphrase and presets it into the
-VM's `gpg-agent` just before launch, so the session can decrypt — the passphrase is
-read locally, never written to disk, and lives only in agent memory. Keep the passphrase
-off the VM (your laptop / a secrets manager). This does **not** hide credentials from
-joined guests of a running session — that's Tier-2 (see the planning doc).
+This applies a `Session` CR to the namespace specified in the manifest. The operator
+provisions an isolated namespace (`omp-session-work`), syncs the `services` subtree from
+GSM into a per-namespace Secret, and launches an `omp` pod.
 
-### Optional: tune the agent's local models
+> **Namespace choice:** The Session CR can live in any namespace — `omp-system` and
+> `omp-sessions` are both conventional choices. Pick one and use it consistently across
+> all commands below.
 
-Two extra capabilities are off by default and turned on with `tune`:
+Want a different subtree — or multiple subtrees? Adjust `spec.subtrees`:
+
+```yaml
+spec:
+  subtrees: ["services", "model"]
+```
+
+Wait for the session to be ready:
 
 ```bash
-./manager.sh tune --memory      # mnemopi long-term memory across sessions
-./manager.sh tune --thinking    # automatic per-turn thinking-level selection
-./manager.sh tune               # both
+kubectl wait --for=jsonpath='{.status.phase}'=Hosting \
+  session/work -n <namespace> --timeout=180s
 ```
 
-Both run on **local on-device ONNX models** (`qwen3-1.7b`), CPU-only, auto-downloaded
-from Hugging Face on first use — no Ollama and no extra credentials. `tune` is
-idempotent config (`omp config set`) and does not disturb running sessions. Expect
-`TUNE_OK`.
+No passphrase is prompted. Credentials are injected from the session's own namespace
+Secret.
 
-## 2. Store the credentials people will need
+## 2. Authenticate the model (first time per session)
 
-Credentials live in the vault under a subtree (default `services`). Add one by piping
-the value in on **stdin** — never as an argument, so it never lands in your shell
-history or the process list:
+If `omp-bootstrap-env` is present in `omp-system` (see the [administrator guide](administrator.md)),
+the operator copies it into the session namespace automatically. The session starts
+immediately and the join link appears in `.status.joinLink` — no manual auth step is
+required before joining. Once inside the session, complete Anthropic OAuth via the omp
+TUI or by typing `/auth login` in the agent pane.
+
+**Fallback — manual auth (no bootstrap env):**
 
 ```bash
-printf '%s' "$MY_GITHUB_TOKEN" | ./manager.sh vault-add services/github/token
+kubectl exec -it -n omp-session-work omp -- bash
+# Inside the container:
+omp auth login
 ```
 
-Check what's there (names only, never values):
+> **Note:** `bash -lc 'omp auth login'` may not work if `omp` is not on `PATH` in the
+> pod's login shell — drop into an interactive `bash` session and run `omp auth login`
+> directly.
+
+The resulting token is written to `~/` on the pod's PVC (`omp-home`) and persists
+across pod restarts. You only need to do this once per session lifecycle.
+
+> **Tip:** If the administrator stored the Anthropic API key with
+> `./administrator.sh vault-add model/anthropic/api-key` and the session was
+> launched with `subtrees: ["services", "model"]`, the session injects
+> `ANTHROPIC_API_KEY` and no interactive login is needed.
+
+## 3. Share it
 
 ```bash
-./manager.sh vault-ls services
+kubectl get session work -n <namespace> -o jsonpath='{.status.joinLink}'
 ```
 
-**Naming matters.** The entry path becomes an environment variable name: `/` and `-`
-become `_`, uppercased. So `services/github/token` → `GITHUB_TOKEN`, which matches
-omp's `TOKEN` pattern and is auto-obfuscated. End an entry with a secret keyword
-(`token`, `key`, `secret`, `password`) so this fires. If you must use a name that
-doesn't, add a value-shape regex to `platform/secrets.yml` and re-run `setup`, or the
-value won't be obfuscated.
-
-**Multi-line entries.** A `pass` entry may hold several `key: value` lines, and each
-becomes its own env var named `<ENTRY>_<KEY>`. So an `atlassian` entry with `email:` and
-`token:` lines injects as `ATLASSIAN_EMAIL` and `ATLASSIAN_TOKEN`. (Detection: the entry's
-first line must be `key: value` with a space after the colon; otherwise the whole first
-line is taken as a single value — the back-compat behaviour.)
-
-**Per-operator identities in one session.** Give each operator a subtree under `people/`
-with two entries — `operator` (`name:`/`email:`, their service-independent identity) and
-`atlassian` (`email:`/`token:`, their JIRA+Confluence credential):
+This prints the join link. Hand `omp join "<link>"` to your operators
+(see the [operator guide](operator.md)). For a read-only link:
 
 ```bash
-printf 'name: Alice Example\nemail: alice@mirantis.com\n'      | ./manager.sh vault-add people/alice/operator
-printf 'email: alice@mirantis.com\ntoken: <alice-api-token>\n' | ./manager.sh vault-add people/alice/atlassian
+kubectl get session work -n <namespace> -o jsonpath='{.status.viewLink}'
 ```
 
-The `token` line auto-obfuscates (name ends in `token`); names and emails are not secret.
-Injecting the parent `people` subtree namespaces every operator's vars by their directory
-name (`ALICE_ATLASSIAN_TOKEN`, `ALICE_OPERATOR_NAME`, `BOB_…`); injecting one operator's
-subtree (`people/alice`) yields the bare `ATLASSIAN_*`/`OPERATOR_*`. The `mirantis-services`
-skill builds an operator roster from the `*_OPERATOR_NAME` vars and acts under the operator
-named in the prompt, asking if it is ambiguous.
-
-## 3. Launch a session
+If the link is empty (e.g. a pod just restarted), trigger a re-capture and wait ~30 s:
 
 ```bash
-./manager.sh new work
+kubectl annotate session work -n <namespace> \
+  omp.mirantis.io/recapture=$(date +%s) --overwrite
 ```
 
-This creates a detached tmux session named `work` running omp, with a seeded
-`~/sessions/work/.omp/` and the whole `services` subtree injected as env vars. `--subtree`
-is repeatable and the subtrees merge (a later `--subtree` wins on a name collision), so to
-run a shared multi-operator session inject the operators alongside the shared services:
+## 4. Drive, list, end
 
 ```bash
-./manager.sh new team  --subtree services --subtree people        # all operators, namespaced
-./manager.sh new alice --subtree services --subtree people/alice  # one operator, bare vars
+# Attach to the session tmux (take the keyboard yourself)
+kubectl exec -it -n omp-session-work omp -- tmux attach -t omp
+
+# List all sessions
+kubectl get sessions -A
+
+# Delete the session (operator GCs namespace + PVC)
+kubectl delete session work -n <namespace>
 ```
 
-Want a different single subtree? `./manager.sh new work --subtree clients/acme`.
+To swap in new per-session skills: delete and re-create the session — assets are seeded
+fresh from the image each boot. Skills are discovered at session startup, not
+hot-reloaded; a restart is the reload.
 
-You'll see it confirm the session is running and remind you how to attach and share.
+## Credential isolation
 
-## 4. Share it
+Per-session isolation is realized:
 
-```bash
-./manager.sh collab work
-```
+- **Namespace isolation:** each session runs in its own `omp-session-NAME` namespace;
+  its pod can only see Secrets in that namespace.
+- **Per-namespace Secret:** the operator syncs only the requested subtrees from GSM
+  into the session's own `omp-creds` Secret — other sessions' namespaces are invisible.
+- **NetworkPolicy:** deny-all ingress; egress limited to DNS + TCP 443 to the internet,
+  with RFC1918 ranges and `169.254.169.254` (GCE metadata server) blocked.
 
-This sends `/collab` into the session and prints the join link:
-
-```
-omp join "n8juTBiv...QPNqAGqaEPeSf..."
-```
-
-Hand that to your operators (see the [operator guide](operator.md)). For a read-only
-link, `./manager.sh collab work view`.
-
-## 5. Drive, list, end
-
-```bash
-./manager.sh attach work     # take the keyboard yourself (most recent if NAME omitted)
-./manager.sh list            # what's running
-./manager.sh kill work       # end the session
-```
-
-To swap in new per-session skills: drop them into `~/sessions/work/.omp/skills/` and
-restart the session (`kill` then `new` — the folder persists). Skills are discovered at
-session startup, not hot-reloaded.
-
-## The one rule you must internalize
-
-The model never sees real credential values, but **everyone in the session does**, and
-**any value a tool prints gets written to the session transcript on disk**. That's why
-the installed `RULES.md` forbids printing secrets, and why a joined guest is inside the
-credential trust boundary. If you store a credential someone shouldn't see, don't share
-that session with them — there is no per-joiner credential hiding yet (that's the
-Tier-2 roadmap). Full reasoning:
-[the credential-isolation doc](../planning/credential-isolation.md).
+A joined guest is still inside the credential trust boundary of their session
+(obfuscation hides values from the model; the guest sees real values on tool cards).
+But guests are confined to that session's credentials.
 
 ## Troubleshooting
 
-- **`collab` prints "No join link found" + a full pane dump.** The session was launched
-  in a pane too narrow for omp to print the link on one line. Sessions created by `new`
-  use a wide pane, so recreate with `kill` + `new` if you hit this on an old session.
-- **Launcher exported nothing / a var is missing.** Check the subtree has entries:
-  `./manager.sh vault-ls services`. Empty subtree → `new` warns and the session still
-  launches, just without injected creds.
-- **A value isn't obfuscated.** Its env-var name probably lacks a secret keyword — add
-  a regex to `platform/secrets.yml`, re-run `setup`, relaunch the session.
+- **Session stuck waiting for `Hosting`.** Check the operator logs:
+  `kubectl logs -n omp-system deploy/omp-operator`. Common causes: the `omp-creds`
+  ExternalSecret is not Valid (only applicable when `spec.subtrees` is non-empty; with
+  empty subtrees the ExternalSecret is skipped entirely — GSM labels mismatch or ESO
+  ClusterSecretStore not ready → re-run `./administrator.sh setup`), or the pod failed
+  to start (image pull error — `kubectl describe pod omp -n omp-session-NAME`).
+- **Collab link is empty.** The pod may have just restarted; trigger re-capture (above)
+  and wait ~30 s. If still empty, exec into the session and check the omp pane directly.
+- **A var is missing / subtree exported nothing.** Check GSM labels:
+  `./administrator.sh vault-ls services`. An empty subtree → session launches without
+  those creds.
+- **A value isn't obfuscated.** The env-var name lacks a secret keyword — add a regex
+  to `platform/secrets.yml` and re-run `./administrator.sh setup`.
+- **Config change not picked up.** Delete the pod to force a restart:
+  `kubectl delete pod omp -n omp-session-NAME`.
 
 ## What you don't do
 
-You never provision, start/stop, or destroy the VM — that's the
-[administrator](administrator.md). And operators never run a script; they just join the
-link you give them.
+You never provision, start/stop, or destroy the GKE cluster — that's the
+[administrator](administrator.md). You never build or push images — that's the GHCR CI
+workflow. You never run `./administrator.sh` for session operations — those are plain
+`kubectl`. Operators just join the link you give them.

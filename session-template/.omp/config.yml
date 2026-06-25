@@ -1,4 +1,4 @@
-# Per-session project config (seeded by ./manager.sh new).
+# Per-session project config (placed by kubectl apply of the Session CR).
 # Its presence makes <workdir>/.omp/ a project root so that this folder's
 # AGENTS.md and skills/ are discovered at session startup. Add session-specific
 # settings here as needed.

@@ -1,10 +1,10 @@
 # Local-model acceleration (deferred)
 
-**Status:** TODO / not started. The VM stays `e2-standard-4` (CPU) until this is taken up.
+**Status:** TODO / not started. The session pod runs on `e2-standard-4` nodes (CPU) until this is taken up.
 
 ## What runs locally today
 
-`manager.sh setup`/`tune` configure three on-device housekeeping models. They are **local
+`administrator.sh setup`/`tune` configure three on-device housekeeping models. They are **local
 ONNX** models (transformers.js + onnxruntime-node), not Ollama, and auto-download from the
 Hugging Face Hub on first use:
 
@@ -32,7 +32,7 @@ models — e.g.:
   wired up.
 - omp's worker forces GPU/WebGPU execution back to CPU, so even a GPU-capable runtime would
   not be used by the current code path.
-- No Ollama daemon is installed on the VM, and `OLLAMA_API_KEY` is unset; `:cloud` model IDs
+- No Ollama daemon is installed in the session pod, and `OLLAMA_API_KEY` is unset; `:cloud` model IDs
   need a local daemon signed in to Ollama cloud.
 
 ## GCP options to revisit

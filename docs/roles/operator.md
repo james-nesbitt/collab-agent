@@ -18,7 +18,7 @@ and it connects with nothing to install.
 
 You'll drop straight into the live session: the same streaming text, tool-call cards,
 footer (cwd, model, context %, cost), and subagent hub everyone else sees. The agent,
-repo, and tools all run on the VM — your machine is just a window.
+repo, and tools all run on the session pod — your machine is just a window.
 
 ## 2. Work in it
 
@@ -52,12 +52,12 @@ If you need to know which credentials exist, ask the agent to list env-var **nam
 
 - **You're inside the trust boundary.** Even though the model only ever receives `#XXXX#`
   placeholders, *you* can see real credential values on screen. Only join sessions
-  you're authorised for. (Confining joiners to a session's own credentials is the
-  unbuilt Tier-2 work — see
-  [the credential-isolation doc](../planning/credential-isolation.md).)
+  you're authorised for. Each session runs in its own isolated Kubernetes namespace with
+  its own credentials — you can only see the creds that were provisioned for this
+  session; pods in other sessions are unreachable.
 - **The session outlives your connection.** Long operations keep running if you drop
-  off; rejoin with the same link. If the host relaunches the session, you'll get a new
-  link from the manager.
+  off; rejoin with the same link. The pod restarts automatically if it exits
+  (`restartPolicy: Always`); the manager will have a fresh join link after a restart.
 - **Leaving:** `/leave` (your previous local session, if any, is restored).
 
 For the full picture of how sharing, encryption, and credentials work, see
