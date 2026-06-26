@@ -59,6 +59,9 @@ NODE_MACHINE_TYPE="${NODE_MACHINE_TYPE:-e2-standard-4}"
 ADMIN_GCP_ACCOUNT="${ADMIN_GCP_ACCOUNT:-$(gcloud config get-value account 2>/dev/null)}"
 OMP_REGISTRY="${OMP_REGISTRY:-ghcr.io/james-nesbitt/collab-agent}"
 OMP_IMAGE_TAG="${OMP_IMAGE_TAG:-latest}"
+# Session image tag defaults to latest independently of the operator tag so that
+# restarted sessions always pick up the newest omp build.
+OMP_SESSION_IMAGE_TAG="${OMP_SESSION_IMAGE_TAG:-latest}"
 
 SUBTREE="${SUBTREE:-services}"
 SESSION_NS="omp-system"
@@ -80,6 +83,7 @@ render() {
     REGION="${REGION}" \
     OMP_REGISTRY="${OMP_REGISTRY}" \
     OMP_IMAGE_TAG="${OMP_IMAGE_TAG}" \
+    OMP_SESSION_IMAGE_TAG="${OMP_SESSION_IMAGE_TAG}" \
         envsubst < "${f}"
 }
 
