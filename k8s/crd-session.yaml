@@ -21,6 +21,9 @@ spec:
         - name: PHASE
           jsonPath: .status.phase
           type: string
+        - name: STATE
+          jsonPath: .spec.state
+          type: string
         - name: NAMESPACE
           jsonPath: .status.namespace
           type: string
@@ -62,6 +65,13 @@ spec:
                     into the session namespace. Defaults to "omp-config".
                     Use named profiles (e.g. omp-config-gemini,
                     omp-config-anthropic) to give sessions different model roles.
+                state:
+                  type: string
+                  enum: [running, stopped]
+                  default: running
+                  description: >-
+                    Desired pod state. running = pod present; stopped = pod
+                    removed, namespace + PVC + secrets retained.
             status:
               type: object
               properties:
@@ -74,6 +84,7 @@ spec:
                     - Hosting
                     - Failed
                     - Terminating
+                    - Stopped
                 namespace:
                   type: string
                 podName:
@@ -84,3 +95,8 @@ spec:
                   type: string
                 message:
                   type: string
+                restartedAt:
+                  type: string
+                  description: >-
+                    Value of the omp.mirantis.io/restartedAt annotation last
+                    applied by the operator.

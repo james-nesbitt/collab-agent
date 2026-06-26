@@ -390,6 +390,46 @@ def _copy_secret(v1: k8s.CoreV1Api, ns: str, secret_name: str, src_ns: str = "om
 
 
 # ---------------------------------------------------------------------------
+# Pod lifecycle helpers
+# ---------------------------------------------------------------------------
+
+def _delete_pod(ns: str) -> None:
+    """Delete pod 'omp' in ns; ignore 404."""
+    v1 = k8s.CoreV1Api()
+    try:
+        v1.delete_namespaced_pod("omp", ns)
+    except k8s.ApiException as exc:
+        if exc.status != 404:
+            raise
+
+
+def _wait_pod_gone(ns: str, timeout: int = 120) -> bool:
+    """Poll until pod 'omp' in ns is fully deleted (404), or timeout. Returns True if gone."""
+    v1 = k8s.CoreV1Api()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            v1.read_namespaced_pod("omp", ns)
+        except k8s.ApiException as exc:
+            if exc.status == 404:
+                return True
+        time.sleep(2)
+    return False
+
+
+def _pod_image(ns: str) -> str | None:
+    """Return the image of pod 'omp' in ns, or None if the pod is absent."""
+    v1 = k8s.CoreV1Api()
+    try:
+        pod = v1.read_namespaced_pod("omp", ns)
+        return pod.spec.containers[0].image
+    except k8s.ApiException as exc:
+        if exc.status == 404:
+            return None
+        raise
+
+
+# ---------------------------------------------------------------------------
 # Pod readiness polling
 # ---------------------------------------------------------------------------
 
@@ -488,7 +528,8 @@ def configure(settings: kopf.OperatorSettings, **_) -> None:
 
 @kopf.on.create(GROUP, VERSION, PLURAL)
 @kopf.on.resume(GROUP, VERSION, PLURAL)
-def reconcile(spec, name, namespace, patch, logger, **_) -> None:
+@kopf.on.update(GROUP, VERSION, PLURAL)
+def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) -> None:
     """
     Reconcile a Session CR:
 
@@ -548,22 +589,54 @@ def reconcile(spec, name, namespace, patch, logger, **_) -> None:
     for np in _network_policies(ns):
         _apply_network_policy(ns, np)
 
-    # 7. Pod
-    _create_or_skip(v1.create_namespaced_pod, ns, _pod(ns, name, image, has_cm, has_pull_secret, extra_env))
+    # 7. State-aware pod convergence
+    desired_state = spec.get("state", "running")
+    desired_image = spec.get("image") or OMP_SESSION_IMAGE
+    restart_nonce = (annotations or {}).get("omp.mirantis.io/restartedAt")
+    applied_nonce = (status or {}).get("restartedAt")
 
-    _patch_cr_status(namespace, name, phase="Running", namespace=ns, podName="omp")
-    logger.info("Pod created in %s; waiting for Ready", ns)
+    if desired_state == "stopped":
+        _delete_pod(ns)
+        patch.status["phase"] = "Stopped"
+        patch.status["namespace"] = ns
+        patch.status["podName"] = ""
+        patch.status["joinLink"] = ""
+        patch.status["viewLink"] = ""
+        logger.info("Session %s stopped (pod removed; namespace + PVC retained)", name)
+        return
+
+    current_image = _pod_image(ns)
+    must_recreate = current_image is not None and (
+        current_image != desired_image or restart_nonce != applied_nonce
+    )
+    created = False
+    if current_image is None or must_recreate:
+        if current_image is not None:
+            _delete_pod(ns)
+            if not _wait_pod_gone(ns, timeout=120):
+                logger.warning("Old pod in %s did not terminate in 120s; aborting recreate", ns)
+                patch.status["message"] = "pod recreate stalled: old pod still terminating"
+                return
+        _create_or_skip(v1.create_namespaced_pod, ns, _pod(ns, name, desired_image, has_cm, has_pull_secret, extra_env))
+        created = True
+        patch.status["restartedAt"] = restart_nonce or ""
+
+    patch.status["phase"] = "Running"
+    patch.status["namespace"] = ns
+    patch.status["podName"] = "omp"
+    logger.info("Pod converged in %s (image=%s, recreated=%s)", ns, desired_image, created)
 
     # 8. Wait for pod Ready
     if not _wait_pod_ready(ns, timeout=300):
-        patch.status["phase"] = "Running"
-        patch.status["namespace"] = ns
-        patch.status["podName"] = "omp"
         patch.status["message"] = "Pod not Ready within 300s"
         logger.warning("Pod omp in %s not Ready after 300s", ns)
         return
 
-    # 9. Capture join link; retry once with longer back-off
+    # 9. Capture join link only when pod was (re)created or link is missing
+    if not created and (status or {}).get("joinLink"):
+        # Pod is current and link already captured — nothing to do
+        return
+
     link = _capture_join_link(ns, view=view)
     if not link:
         logger.info("Join link not found on first attempt; retrying in 15s")

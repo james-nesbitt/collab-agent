@@ -119,9 +119,46 @@ kubectl get sessions -A
 kubectl delete session work -n <namespace>
 ```
 
-To swap in new per-session skills: delete and re-create the session — assets are seeded
-fresh from the image each boot. Skills are discovered at session startup, not
-hot-reloaded; a restart is the reload.
+> **`kubectl delete session` is the only operation that destroys the PVC.** Stop,
+> restart, and image-move all preserve it.
+
+### Stop / start / restart / image-move (preserve PVC + conversation)
+
+The omp conversation is stored on the PVC under `~/.omp/agent/sessions/` and is
+resumed automatically via `omp -c` on every pod start. These operations never
+touch the PVC:
+
+```bash
+# Stop: removes the pod; namespace, PVC, secrets, NetworkPolicies stay
+kubectl patch session work -n <namespace> \
+  --type=merge -p '{"spec":{"state":"stopped"}}'
+
+# Start: recreates the pod; conversation resumes from PVC
+kubectl patch session work -n <namespace> \
+  --type=merge -p '{"spec":{"state":"running"}}'
+
+# Restart / re-pull latest image (conversation preserved)
+kubectl annotate session work -n <namespace> \
+  omp.mirantis.io/restartedAt=$(date +%s) --overwrite
+
+# Move to a specific pinned image
+kubectl patch session work -n <namespace> \
+  --type=merge -p '{"spec":{"image":"ghcr.io/james-nesbitt/collab-agent/omp-session:sha-XXXX"}}'
+```
+
+After any restart/start/image-move the collab link rotates. The operator
+re-captures it automatically; if `status.joinLink` is empty, trigger re-capture:
+
+```bash
+kubectl annotate session work -n <namespace> \
+  omp.mirantis.io/recapture=$(date +%s) --overwrite
+```
+
+Note: restarting a `stopped` session via the restart annotation is deferred — the
+operator's stopped branch takes priority. Set `state: running` first.
+
+To swap skills: restart the pod (annotation bump) — assets are re-seeded from the
+image on each pod start. Skills are discovered at session startup.
 
 ## Credential isolation
 
@@ -153,8 +190,9 @@ But guests are confined to that session's credentials.
   those creds.
 - **A value isn't obfuscated.** The env-var name lacks a secret keyword — add a regex
   to `platform/secrets.yml` and re-run `./administrator.sh setup`.
-- **Config change not picked up.** Delete the pod to force a restart:
-  `kubectl delete pod omp -n omp-session-NAME`.
+- **Config change not picked up.** Use the restart annotation instead of deleting the
+  pod directly:
+  `kubectl annotate session NAME -n omp-system omp.mirantis.io/restartedAt=$(date +%s) --overwrite`
 
 ## What you don't do
 
