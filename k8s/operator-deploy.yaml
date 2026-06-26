@@ -20,7 +20,7 @@ spec:
           imagePullPolicy: Always
           env:
             - name: OMP_SESSION_IMAGE
-              value: "${OMP_REGISTRY}/omp-session:${OMP_IMAGE_TAG}"
+              value: "${OMP_REGISTRY}/omp-session:${OMP_SESSION_IMAGE_TAG}"
             - name: OMP_GSM_PROJECT
               value: "${GCP_PROJECT}"
             - name: OMP_RELAY
