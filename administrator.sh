@@ -613,6 +613,110 @@ cmd_port_forward() {
     kubectl port-forward -n "${ns}" pod/omp "${local_port}:${remote_port}"
 }
 
+cmd_session_transfer() {
+    # session-transfer NAME [LOCAL_DIR] [SESSION_ID]
+    # Copy a local omp session to a running GKE session pod so the conversation
+    # resumes on the next pod start.
+    #
+    # NAME        — GKE session name (e.g. prodeng-3468)
+    # LOCAL_DIR   — local working directory the session was running in
+    #               (default: current directory)
+    # SESSION_ID  — specific session UUID to transfer (default: most recent for LOCAL_DIR)
+    #
+    # The session .jsonl is copied to the pod PVC via kubectl cp.
+    # If the local cwd encoding differs from the pod encoding, RESUME_SESSION_ID is set
+    # in spec.env so the entrypoint uses --resume instead of -c.
+    # The pod is restarted to pick up the session (unless the env flag is the only change
+    # and you want to defer the restart).
+    local session_name="${1:-}"
+    local local_dir="${2:-$(pwd)}"
+    local explicit_id="${3:-}"
+    [[ -n "${session_name}" ]] || die "Usage: ./administrator.sh session-transfer NAME [LOCAL_DIR] [SESSION_ID]"
+    require_cluster
+
+    local local_home="${HOME}"
+    local_dir=$(realpath "${local_dir}") || die "LOCAL_DIR '${local_dir}' not found"
+
+    # Locate the local omp agent directory (prefer newer ~/.local/share/omp).
+    local agent_dir=""
+    if [[ -d "${local_home}/.local/share/omp" ]]; then
+        agent_dir="${local_home}/.local/share/omp"
+    elif [[ -d "${local_home}/.omp/agent" ]]; then
+        agent_dir="${local_home}/.omp/agent"
+    else
+        die "No local omp agent dir found (looked for ~/.local/share/omp and ~/.omp/agent)"
+    fi
+
+    # Compute the cwd-relative encoding for LOCAL_DIR.
+    local rel
+    rel=$(realpath --relative-to="${local_home}" "${local_dir}" 2>/dev/null) \
+        || die "LOCAL_DIR '${local_dir}' is not under HOME (${local_home})"
+    local local_encoded="-${rel//\//-}"
+
+    # Find the session .jsonl to transfer.
+    local session_dir="${agent_dir}/sessions/${local_encoded}"
+    [[ -d "${session_dir}" ]] \
+        || die "No sessions for '${local_dir}' (looked in ${session_dir})"
+
+    local jsonl=""
+    if [[ -n "${explicit_id}" ]]; then
+        jsonl=$(ls "${session_dir}"/*"${explicit_id}"*.jsonl 2>/dev/null | head -1)
+        [[ -n "${jsonl}" ]] || die "Session ID '${explicit_id}' not found in ${session_dir}"
+    else
+        jsonl=$(ls -t "${session_dir}"/*.jsonl 2>/dev/null | head -1)
+        [[ -n "${jsonl}" ]] || die "No .jsonl files in ${session_dir}"
+    fi
+
+    # Extract session ID from the filename: strip timestamp prefix up to first _.
+    local filename
+    filename=$(basename "${jsonl}" .jsonl)
+    local session_id="${filename#*_}"
+
+    # Pod-side paths.
+    local ns="omp-session-${session_name}"
+    local pod_home="/home/omp"
+    local pod_agent="${pod_home}/.omp/agent"
+    local pod_encoded="-${session_name}"          # pod cwd is always ~/SESSION_NAME
+    local pod_session_dir="${pod_agent}/sessions/${pod_encoded}"
+
+    info "Session to transfer  : ${session_id}"
+    info "Source               : ${jsonl}"
+    info "Destination          : ${ns}/omp:${pod_session_dir}/$(basename "${jsonl}")"
+    info "Local encoding       : ${local_encoded}"
+    info "Pod encoding         : ${pod_encoded}"
+
+    # Create the target directory on the pod (idempotent).
+    kubectl exec -n "${ns}" omp -- mkdir -p "${pod_session_dir}"
+
+    # Copy the session file to the pod PVC via kubectl cp (goes through the running pod).
+    kubectl cp "${jsonl}" "${ns}/omp:${pod_session_dir}/$(basename "${jsonl}")"
+    ok "Session file copied."
+
+    # If encodings differ, inject RESUME_SESSION_ID so the entrypoint uses --resume=<id>.
+    # (When encodings match, -c will find the session automatically; no env patch needed.)
+    if [[ "${local_encoded}" != "${pod_encoded}" ]]; then
+        info "Encodings differ — setting RESUME_SESSION_ID in spec.env…"
+        kubectl patch session "${session_name}" -n "${SESSION_NS}" \
+            --type=merge -p "{\"spec\":{\"env\":{\"RESUME_SESSION_ID\":\"${session_id}\"}}}"
+        ok "RESUME_SESSION_ID set."
+        info "After the session resumes, clear it with:"
+        info "  kubectl patch session ${session_name} -n ${SESSION_NS} --type=merge -p '{\"spec\":{\"env\":{\"RESUME_SESSION_ID\":null}}}'"
+    fi
+
+    # Restart the pod so omp picks up the transferred session.
+    info "Restarting pod to resume transferred session…"
+    kubectl patch session "${session_name}" -n "${SESSION_NS}" \
+        --type=merge -p "{\"spec\":{\"image\":null},\"metadata\":{\"annotations\":{\"omp.mirantis.io/restartedAt\":\"$(date +%s)\"}}}"
+
+    echo ""
+    echo "SESSION_TRANSFER_OK"
+    echo "  Session : ${session_id}"
+    echo "  Pod     : ${ns}"
+    echo ""
+    echo "  Wait for Hosting, then get the collab link:"
+    echo "    kubectl get session ${session_name} -n ${SESSION_NS} -o jsonpath='{.status.joinLink}'"
+}
+
 cmd_help() {
     sed -n '2,/^set -/p' "$0" | grep '^#' | sed 's/^# \?//'
 }
@@ -634,8 +738,9 @@ case "${SUBCOMMAND}" in
     vault-add)      cmd_vault_add "$@" ;;
     vault-ls)       cmd_vault_ls "$@" ;;
     auth)           cmd_auth "$@" ;;
-    port-forward)   cmd_port_forward "$@" ;;
-    help|--help|-h) cmd_help ;;
+    port-forward)    cmd_port_forward "$@" ;;
+    session-transfer) cmd_session_transfer "$@" ;;
+    help|--help|-h)  cmd_help ;;
     *)
         echo "Unknown subcommand: ${SUBCOMMAND}" >&2
         echo "Run './administrator.sh help' for usage." >&2

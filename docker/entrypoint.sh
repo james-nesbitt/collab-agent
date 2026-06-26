@@ -51,10 +51,15 @@ fi
 # Container lifetime = omp session lifetime.
 # pod restartPolicy:Always restarts the container if omp exits.
 cd "${WORK_DIR}"
-# Resume the omp session bound to this work dir if one exists on the PVC.
-# -c continues the previous session for the cwd; on a fresh PVC there is no
-# prior session, so launch without it to avoid a resume miss.
-if find "${HOME}/.omp/agent/sessions" -type f -name '*.jsonl' 2>/dev/null | grep -q .; then
+# Resume the omp session for this work dir.
+# Priority order:
+#   1. RESUME_SESSION_ID — set by session-transfer to resume a specific transferred session
+#      by ID regardless of cwd encoding (handles cross-path transfers).
+#   2. -c / --continue   — resume the most recent session for this cwd (normal restarts).
+#   3. fresh start       — no prior session found on PVC.
+if [[ -n "${RESUME_SESSION_ID:-}" ]]; then
+    tmux new-session -d -s omp -x 220 -y 50 "exec omp --resume='${RESUME_SESSION_ID}' --allow-home"
+elif find "${HOME}/.omp/agent/sessions" -type f -name '*.jsonl' 2>/dev/null | grep -q .; then
     tmux new-session -d -s omp -x 220 -y 50 'exec omp -c --allow-home'
 else
     tmux new-session -d -s omp -x 220 -y 50 'exec omp --allow-home'

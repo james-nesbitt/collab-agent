@@ -57,6 +57,7 @@ kubectl wait --for=jsonpath='{.status.phase}'=Hosting \
 | Move to a pinned image | `kubectl patch session NAME -n omp-system --type=merge -p '{"spec":{"image":"ghcr.io/james-nesbitt/collab-agent/omp-session:sha-XXXX"}}'` |
 | Auth a provider in a session | `./administrator.sh auth NAME PROVIDER` — providers: `anthropic` `gcloud` `aws` `az` `gh` |
 | Port-forward for browser OAuth | `./administrator.sh port-forward NAME LOCAL_PORT` |
+| Transfer local session to GKE pod | `./administrator.sh session-transfer NAME [LOCAL_DIR] [SESSION_ID]` |
 | Skip setup wizard in tmux | `kubectl exec -n omp-session-NAME omp -- bash -lc 'tmux send-keys -t omp Escape Escape Escape'` |
 | Attach to session tmux | `kubectl exec -it -n omp-session-NAME omp -- tmux attach -t omp` |
 | Get collab join link | `kubectl get session NAME -n omp-system -o jsonpath='{.status.joinLink}'` |
@@ -109,6 +110,23 @@ kubectl wait --for=jsonpath='{.status.phase}'=Hosting \
   # Terminal 2
   kubectl exec -it -n omp-session-work omp -- bash -lc \
     'aws configure sso --redirect-url http://localhost:8400/callback'
+  ```
+
+- **Transfer a local omp session to a GKE pod:**
+  ```bash
+  # Most recent session for ~/prodeng-3468 → pod named prodeng-3468
+  ./administrator.sh session-transfer prodeng-3468 ~/prodeng-3468
+
+  # Specific session by ID prefix
+  ./administrator.sh session-transfer prodeng-3468 ~/prodeng-3468 019f030d
+
+  # From a deeper path (auto-injects RESUME_SESSION_ID for cross-path resume)
+  ./administrator.sh session-transfer prodeng-3468 ~/Documents/Mirantis/research/prodeng-3468
+  ```
+  The session `.jsonl` is copied to the pod PVC via `kubectl cp`. The pod restarts and
+  omp resumes the conversation. After the first resume, clear `RESUME_SESSION_ID` if set:
+  ```bash
+  kubectl patch session NAME -n omp-system --type=merge -p '{"spec":{"env":{"RESUME_SESSION_ID":null}}}'
   ```
 
 - **If collab link is empty** (pod just restarted or auth just completed): trigger
