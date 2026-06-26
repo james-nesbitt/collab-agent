@@ -53,7 +53,7 @@ kubectl wait --for=jsonpath='{.status.phase}'=Hosting \
 | Kill session (destroys namespace + PVC) | `kubectl delete session NAME -n omp-system` |
 | Stop session (keep PVC + namespace) | `kubectl patch session NAME -n omp-system --type=merge -p '{"spec":{"state":"stopped"}}'` |
 | Start a stopped session | `kubectl patch session NAME -n omp-system --type=merge -p '{"spec":{"state":"running"}}'` |
-| Restart pod / re-pull latest image | `kubectl annotate session NAME -n omp-system omp.mirantis.io/restartedAt=$(date +%s) --overwrite` |
+| Restart (always moves to latest image) | `kubectl patch session NAME -n omp-system --type=merge -p "{\"spec\":{\"image\":null},\"metadata\":{\"annotations\":{\"omp.mirantis.io/restartedAt\":\"$(date +%s)\"}}}"` |
 | Move to a pinned image | `kubectl patch session NAME -n omp-system --type=merge -p '{"spec":{"image":"ghcr.io/james-nesbitt/collab-agent/omp-session:sha-XXXX"}}'` |
 | Check auth state in pod | `kubectl exec -n omp-session-NAME omp -- bash -lc 'omp auth status 2>&1 \|\| true'` |
 | Override auth (Anthropic SSO) | `kubectl exec -it -n omp-session-NAME omp -- bash -lc 'omp auth login anthropic'` |
@@ -121,8 +121,8 @@ kubectl wait --for=jsonpath='{.status.phase}'=Hosting \
 - **Stop** (`state: stopped`) removes the pod only — namespace, PVC, secrets, and
   NetworkPolicies are retained. The conversation is preserved on the PVC.
 - **Start** (`state: running`) recreates the pod and resumes the omp session via `-c`.
-- **Restart** (bump `omp.mirantis.io/restartedAt`) re-pulls the current image tag and
-  resumes the conversation.
+- **Restart** (combined patch: clears `spec.image` + bumps `restartedAt`) always moves
+  to the latest published image and resumes the conversation from the PVC.
 - **Image move** (`spec.image`) pins a specific digest and recreates the pod.
 - `kubectl delete session` is the **only** operation that destroys the PVC.
 - After restart/start/image-move the collab link rotates — re-read `status.joinLink`.

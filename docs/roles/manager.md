@@ -137,9 +137,9 @@ kubectl patch session work -n <namespace> \
 kubectl patch session work -n <namespace> \
   --type=merge -p '{"spec":{"state":"running"}}'
 
-# Restart / re-pull latest image (conversation preserved)
-kubectl annotate session work -n <namespace> \
-  omp.mirantis.io/restartedAt=$(date +%s) --overwrite
+# Restart: always moves to latest image + preserves conversation
+kubectl patch session work -n <namespace> \
+  --type=merge -p "{\"spec\":{\"image\":null},\"metadata\":{\"annotations\":{\"omp.mirantis.io/restartedAt\":\"$(date +%s)\"}}}"
 
 # Move to a specific pinned image
 kubectl patch session work -n <namespace> \
