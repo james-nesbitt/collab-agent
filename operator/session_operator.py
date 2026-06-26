@@ -11,6 +11,7 @@ Credentials arrive in pods via ESO → K8s Secret → envFrom.
 import logging
 import os
 import re
+import secrets
 import time
 
 import kopf
@@ -238,7 +239,7 @@ def _network_policies(ns: str) -> list[dict]:
     ]
 
 
-def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_secret: bool = False, extra_env: dict | None = None) -> k8s.V1Pod:
+def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_secret: bool = False, extra_env: dict | None = None, auth_broker: bool = False, broker_token: str = "") -> k8s.V1Pod:
     """
     Build the session pod manifest.
 
@@ -257,6 +258,9 @@ def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_s
         env.append(k8s.V1EnvVar(name="COLLAB_RELAY", value=OMP_RELAY))
     for k, v in (extra_env or {}).items():
         env.append(k8s.V1EnvVar(name=k, value=v))
+    if auth_broker and broker_token:
+        env.append(k8s.V1EnvVar(name="OMP_AUTH_BROKER_URL", value="http://localhost:9999"))
+        env.append(k8s.V1EnvVar(name="OMP_AUTH_BROKER_TOKEN", value=broker_token))
 
     volume_mounts = [
         k8s.V1VolumeMount(name="omp-home", mount_path="/home/omp"),
@@ -331,7 +335,32 @@ def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_s
                         capabilities=k8s.V1Capabilities(drop=["ALL"]),
                     ),
                     volume_mounts=volume_mounts,
-                )
+                ),
+                *([
+                    k8s.V1Container(
+                        name="auth-broker",
+                        image=image,
+                        image_pull_policy="Always",
+                        command=["omp", "auth-broker", "serve",
+                                 "--bind", "localhost:9999"],
+                        env=[
+                            k8s.V1EnvVar(name="OMP_AUTH_BROKER_TOKEN", value=broker_token),
+                        ],
+                        security_context=k8s.V1SecurityContext(
+                            run_as_non_root=True,
+                            run_as_user=1000,
+                            run_as_group=1000,
+                            allow_privilege_escalation=False,
+                            seccomp_profile=k8s.V1SeccompProfile(type="Unconfined"),
+                            capabilities=k8s.V1Capabilities(drop=["ALL"]),
+                        ),
+                        # Shares $HOME (PVC) with the main container so the broker's
+                        # SQLite credential DB is on the same persistent volume.
+                        volume_mounts=[
+                            k8s.V1VolumeMount(name="omp-home", mount_path="/home/omp"),
+                        ],
+                    )
+                ] if auth_broker and broker_token else []),
             ],
             volumes=volumes,
         ),
@@ -387,6 +416,35 @@ def _copy_secret(v1: k8s.CoreV1Api, ns: str, secret_name: str, src_ns: str = "om
     )
     _create_or_skip(v1.create_namespaced_secret, ns, dst)
     return True
+
+
+def _ensure_broker_token_secret(v1: k8s.CoreV1Api, ns: str) -> str:
+    """
+    Return the auth-broker bearer token for the session namespace.
+
+    Creates K8s Secret 'auth-broker-token' in ns on first call (random 32-byte
+    hex token); returns the existing token on subsequent calls. The token is
+    scoped to the pod lifetime: deleted when the namespace is GC'd.
+    Never stored in GSM — it is ephemeral and session-scoped.
+    """
+    secret_name = "auth-broker-token"
+    try:
+        secret = v1.read_namespaced_secret(secret_name, ns)
+        return (secret.data or {}).get("token", b"").decode() if isinstance(
+            (secret.data or {}).get("token", b""), bytes
+        ) else (secret.data or {}).get("token", "")
+    except k8s.ApiException as exc:
+        if exc.status != 404:
+            raise
+    # Generate and store a fresh token
+    import base64
+    token = secrets.token_hex(32)
+    secret = k8s.V1Secret(
+        metadata=k8s.V1ObjectMeta(name=secret_name, namespace=ns),
+        string_data={"token": token},
+    )
+    _create_or_skip(v1.create_namespaced_secret, ns, secret)
+    return token
 
 
 # ---------------------------------------------------------------------------
@@ -545,9 +603,9 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
     """
     subtrees: list = list(spec.get("subtrees", ["services"]))
     view: bool = bool(spec.get("view", False))
-    image: str = spec.get("image") or OMP_SESSION_IMAGE
     config_ref: str = spec.get("configRef", "omp-config")
     extra_env: dict = dict(spec.get("env", {}))
+    auth_broker: bool = bool(spec.get("authBroker", False))
     ns: str = f"omp-session-{name}"
 
     _patch_cr_status(namespace, name, phase="Provisioning")
@@ -617,7 +675,13 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
                 logger.warning("Old pod in %s did not terminate in 120s; aborting recreate", ns)
                 patch.status["message"] = "pod recreate stalled: old pod still terminating"
                 return
-        _create_or_skip(v1.create_namespaced_pod, ns, _pod(ns, name, desired_image, has_cm, has_pull_secret, extra_env))
+        # 2c. Auth-broker token secret (idempotent; generates only on first call)
+        broker_token = ""
+        if auth_broker:
+            broker_token = _ensure_broker_token_secret(v1, ns)
+            patch.status["authBrokerUrl"] = "http://localhost:9999"
+            logger.info("Auth-broker enabled for session %s (token stored in auth-broker-token secret)", name)
+        _create_or_skip(v1.create_namespaced_pod, ns, _pod(ns, name, desired_image, has_cm, has_pull_secret, extra_env, auth_broker=auth_broker, broker_token=broker_token))
         created = True
         patch.status["restartedAt"] = restart_nonce or ""
 
