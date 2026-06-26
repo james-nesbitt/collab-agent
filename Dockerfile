@@ -26,6 +26,31 @@ https://download.docker.com/linux/ubuntu noble stable" \
         gh && \
     rm -rf /var/lib/apt/lists/*
 
+# ── 1b. Cloud CLIs: gcloud, aws-cli v2, azure-cli ───────────────────────────
+# Each CLI is installed system-wide (as root) so all users can call them.
+# Credentials are stored per-user under $HOME (on the PVC) and survive restarts.
+RUN \
+    # Google Cloud CLI — official apt repo
+    curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | \
+        gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/cloud.google.gpg] \
+https://packages.cloud.google.com/apt cloud-sdk main" \
+        > /etc/apt/sources.list.d/google-cloud-sdk.list && \
+    # Azure CLI — official Microsoft apt repo
+    curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | \
+        gpg --dearmor -o /usr/share/keyrings/microsoft.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/microsoft.gpg] \
+https://packages.microsoft.com/repos/azure-cli/ noble main" \
+        > /etc/apt/sources.list.d/azure-cli.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends google-cloud-cli azure-cli python3-crcmod && \
+    # AWS CLI v2 — official installer (no apt package)
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip && \
+    unzip -q /tmp/awscliv2.zip -d /tmp && \
+    /tmp/aws/install && \
+    rm -rf /tmp/aws /tmp/awscliv2.zip && \
+    rm -rf /var/lib/apt/lists/*
+
 # ── 2. Rename base user ubuntu → omp (preserves UID/GID 1000) ───────────────
 RUN groupmod -n omp ubuntu && \
     usermod -l omp -d /home/omp -m -s /bin/bash ubuntu

@@ -55,8 +55,8 @@ kubectl wait --for=jsonpath='{.status.phase}'=Hosting \
 | Start a stopped session | `kubectl patch session NAME -n omp-system --type=merge -p '{"spec":{"state":"running"}}'` |
 | Restart (always moves to latest image) | `kubectl patch session NAME -n omp-system --type=merge -p "{\"spec\":{\"image\":null},\"metadata\":{\"annotations\":{\"omp.mirantis.io/restartedAt\":\"$(date +%s)\"}}}"` |
 | Move to a pinned image | `kubectl patch session NAME -n omp-system --type=merge -p '{"spec":{"image":"ghcr.io/james-nesbitt/collab-agent/omp-session:sha-XXXX"}}'` |
-| Check auth state in pod | `kubectl exec -n omp-session-NAME omp -- bash -lc 'omp auth status 2>&1 \|\| true'` |
-| Override auth (Anthropic SSO) | `kubectl exec -it -n omp-session-NAME omp -- bash -lc 'omp auth login anthropic'` |
+| Auth a provider in a session | `./administrator.sh auth NAME PROVIDER` — providers: `anthropic` `gcloud` `aws` `az` `gh` |
+| Port-forward for browser OAuth | `./administrator.sh port-forward NAME LOCAL_PORT` |
 | Skip setup wizard in tmux | `kubectl exec -n omp-session-NAME omp -- bash -lc 'tmux send-keys -t omp Escape Escape Escape'` |
 | Attach to session tmux | `kubectl exec -it -n omp-session-NAME omp -- tmux attach -t omp` |
 | Get collab join link | `kubectl get session NAME -n omp-system -o jsonpath='{.status.joinLink}'` |
@@ -73,25 +73,43 @@ kubectl wait --for=jsonpath='{.status.phase}'=Hosting \
   2. `kubectl get session work -n omp-system -o jsonpath='{.status.joinLink}'`
   3. Hand `omp join "<link>"` to operators.
 
-- **Launch and share (Anthropic SSO):**
+- **Launch and share (Anthropic — device code):**
   1. Apply Session CR; wait for `Running`.
-  2. Login inside the pod (device-code flow — browser not required in pod):
+  2. Authenticate Anthropic (device code — visit URL in your browser):
      ```bash
-     kubectl exec -it -n omp-session-work omp -- bash -lc 'omp auth login anthropic'
+     ./administrator.sh auth work anthropic
      ```
-     Complete the device-code flow in your browser. Token saves to PVC; survives restarts.
-  3. If omp is in the setup wizard, dismiss it first:
+     Token saves to PVC; survives restarts. One-time per session.
+  3. Dismiss setup wizard if omp is waiting:
      ```bash
      kubectl exec -n omp-session-work omp -- bash -lc 'tmux send-keys -t omp Escape Escape Escape'
      ```
-  4. Trigger collab link capture:
-     ```bash
-     kubectl annotate session work -n omp-system \
-       omp.mirantis.io/recapture=$(date +%s) --overwrite
-     sleep 15
-     kubectl get session work -n omp-system -o jsonpath='{.status.joinLink}'
-     ```
-  5. Hand the link to operators.
+  4. Trigger collab link capture and hand to operators.
+
+- **Authenticate a cloud CLI (gcloud / aws / az):**
+  ```bash
+  ./administrator.sh auth work gcloud      # device code → gcloud ADC on PVC
+  ./administrator.sh auth work aws         # device code SSO login (profile must exist)
+  ./administrator.sh auth work aws-configure  # interactive SSO wizard (browser redirect)
+  ./administrator.sh auth work az          # device code → Azure token on PVC
+  ```
+  Credentials are stored under `$HOME` on the session PVC and survive pod restarts.
+  Re-auth only needed when the token expires (gcloud/az: never for refresh; aws SSO: per portal policy ~8–12 h).
+
+- **Authenticate GitHub (paste token):**
+  ```bash
+  printf '%s' "$MY_PAT" | ./administrator.sh auth work gh
+  ```
+  Alternatively, store the PAT in GSM (`vault-add services/github/token`) and inject via `omp-creds`.
+
+- **If the browser-redirect OAuth can't open a browser in the pod** (e.g. `aws configure sso`):
+  ```bash
+  # Terminal 1
+  ./administrator.sh port-forward work 8400
+  # Terminal 2
+  kubectl exec -it -n omp-session-work omp -- bash -lc \
+    'aws configure sso --redirect-url http://localhost:8400/callback'
+  ```
 
 - **If collab link is empty** (pod just restarted or auth just completed): trigger
   re-capture, wait ~15 s, then re-read `status.joinLink`. The operator sends `/collab`
@@ -129,6 +147,36 @@ kubectl wait --for=jsonpath='{.status.phase}'=Hosting \
   If empty, bump the recapture annotation (`omp.mirantis.io/recapture=$(date +%s)`).
 - Restarting a `stopped` session is deferred: the stopped branch takes priority. Set
   `state: running` first, then bump the restart nonce if needed.
+
+## Auth-broker sidecar (automatic token refresh)
+
+For sessions where manual re-auth (when tokens expire) is inconvenient, enable the
+`omp auth-broker` sidecar. The sidecar serves credentials on `localhost:9999` and
+handles token refresh automatically.
+
+```bash
+# Create a session with the auth-broker sidecar
+kubectl apply -f - <<EOF
+apiVersion: omp.mirantis.io/v1alpha1
+kind: Session
+metadata:
+  name: work
+  namespace: omp-system
+spec:
+  subtrees: ["services"]
+  authBroker: true
+EOF
+
+# Initial auth into the sidecar (exec into the auth-broker container)
+./administrator.sh auth work anthropic auth-broker
+./administrator.sh auth work gcloud    auth-broker
+
+# After initial auth: broker auto-refreshes; no further action needed.
+```
+
+- The broker runs in the `auth-broker` container sharing `$HOME` (PVC) with omp.
+- Credentials persist on the PVC and survive pod restarts.
+- One-time exec per provider, then automatic refresh until the refresh token itself expires.
 
 ## Guardrails
 

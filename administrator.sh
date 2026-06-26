@@ -530,6 +530,89 @@ cmd_vault_ls() {
         --format="value(name)"
 }
 
+cmd_auth() {
+    # auth NAME PROVIDER [CONTAINER]
+    # Execute an interactive auth flow inside a running session pod.
+    # Credentials are stored under $HOME on the PVC and survive pod restarts.
+    #
+    # Providers:
+    #   anthropic   omp auth-broker login anthropic  (device code)
+    #   gcloud      gcloud auth login --no-browser    (device code)
+    #   aws         aws sso login --no-browser        (device code; profile prompted)
+    #   az          az login --use-device-code        (device code)
+    #   gh TOKEN    gh auth login --with-token        (token on stdin)
+    local name="${1:-}"
+    local provider="${2:-}"
+    local container="${3:-omp}"
+    [[ -n "${name}" ]]     || die "Usage: ./administrator.sh auth NAME PROVIDER [CONTAINER]"
+    [[ -n "${provider}" ]] || die "Usage: ./administrator.sh auth NAME PROVIDER [CONTAINER]"
+    require_cluster
+
+    local ns="omp-session-${name}"
+    local kctl_exec="kubectl exec -it -n ${ns} -c ${container} omp -- bash -lc"
+
+    case "${provider}" in
+        anthropic)
+            info "Authenticating Anthropic in session '${name}' (device code — visit the URL in your browser)…"
+            kubectl exec -it -n "${ns}" -c "${container}" omp -- bash -lc \
+                'omp auth-broker login anthropic'
+            ;;
+        gcloud)
+            info "Authenticating gcloud in session '${name}' (device code — visit the URL in your browser)…"
+            kubectl exec -it -n "${ns}" -c "${container}" omp -- bash -lc \
+                'gcloud auth login --no-browser'
+            ;;
+        aws)
+            info "Authenticating AWS SSO in session '${name}' (device code — visit the URL in your browser)…"
+            info "If no SSO profile is configured yet, run: ./administrator.sh auth ${name} aws-configure"
+            kubectl exec -it -n "${ns}" -c "${container}" omp -- bash -lc \
+                'aws sso login --no-browser'
+            ;;
+        aws-configure)
+            info "Running 'aws configure sso' wizard in session '${name}'…"
+            info "NOTE: the wizard opens a browser URL — use a port-forward if your terminal can't open one."
+            kubectl exec -it -n "${ns}" -c "${container}" omp -- bash -lc \
+                'aws configure sso'
+            ;;
+        az)
+            info "Authenticating Azure CLI in session '${name}' (device code — visit the URL in your browser)…"
+            kubectl exec -it -n "${ns}" -c "${container}" omp -- bash -lc \
+                'az login --use-device-code'
+            ;;
+        gh)
+            # Token piped on stdin; never appears in argv
+            info "Authenticating GitHub CLI in session '${name}' (token on stdin)…"
+            info "Paste your GitHub PAT and press Ctrl-D:"
+            kubectl exec -i -n "${ns}" -c "${container}" omp -- bash -lc \
+                'gh auth login --with-token'
+            ;;
+        *)
+            die "Unknown provider '${provider}'. Valid: anthropic gcloud aws aws-configure az gh"
+            ;;
+    esac
+}
+
+cmd_port_forward() {
+    # port-forward NAME LOCAL_PORT [REMOTE_PORT]
+    # Forward a port from the session pod to localhost.
+    # Useful for browser-redirect OAuth flows (e.g. aws configure sso).
+    # Example:
+    #   Terminal 1: ./administrator.sh port-forward work 8400
+    #   Terminal 2: kubectl exec -it -n omp-session-work omp -- bash -lc \
+    #                 'aws configure sso --redirect-url http://localhost:8400/callback'
+    local name="${1:-}"
+    local local_port="${2:-}"
+    local remote_port="${3:-${local_port}}"
+    [[ -n "${name}" ]]       || die "Usage: ./administrator.sh port-forward NAME LOCAL_PORT [REMOTE_PORT]"
+    [[ -n "${local_port}" ]] || die "Usage: ./administrator.sh port-forward NAME LOCAL_PORT [REMOTE_PORT]"
+    require_cluster
+
+    local ns="omp-session-${name}"
+    info "Forwarding localhost:${local_port} → pod omp in ${ns}:${remote_port}"
+    info "Press Ctrl-C to stop."
+    kubectl port-forward -n "${ns}" pod/omp "${local_port}:${remote_port}"
+}
+
 cmd_help() {
     sed -n '2,/^set -/p' "$0" | grep '^#' | sed 's/^# \?//'
 }
@@ -550,6 +633,8 @@ case "${SUBCOMMAND}" in
     tune)           cmd_tune "$@" ;;
     vault-add)      cmd_vault_add "$@" ;;
     vault-ls)       cmd_vault_ls "$@" ;;
+    auth)           cmd_auth "$@" ;;
+    port-forward)   cmd_port_forward "$@" ;;
     help|--help|-h) cmd_help ;;
     *)
         echo "Unknown subcommand: ${SUBCOMMAND}" >&2

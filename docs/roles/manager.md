@@ -58,33 +58,85 @@ kubectl wait --for=jsonpath='{.status.phase}'=Hosting \
 No passphrase is prompted. Credentials are injected from the session's own namespace
 Secret.
 
-## 2. Authenticate the model (first time per session)
+## 2. Authenticate providers (first time per session)
 
-If `omp-bootstrap-env` is present in `omp-system` (see the [administrator guide](administrator.md)),
-the operator copies it into the session namespace automatically. The session starts
-immediately and the join link appears in `.status.joinLink` — no manual auth step is
-required before joining. Once inside the session, complete Anthropic OAuth via the omp
-TUI or by typing `/auth login` in the agent pane.
+Session credentials arrive in two ways:
 
-**Fallback — manual auth (no bootstrap env):**
+- **Static keys / API tokens** (Gemini, JIRA, GitHub PAT, AWS long-term keys, etc.):
+  stored in GSM via `vault-add`, synced into the session pod at startup via ESO. No
+  interactive step needed — the session starts authenticated.
+
+- **Interactive OAuth / SSO flows** (Anthropic, gcloud personal ADC, AWS SSO, Azure
+  personal account): require a one-time device-code or browser-based login _inside_
+  the pod. Use `./administrator.sh auth`:
 
 ```bash
-kubectl exec -it -n omp-session-work omp -- bash
-# Inside the container:
-omp auth login
+# Anthropic — device code (visit the printed URL in your browser)
+./administrator.sh auth work anthropic
+
+# GCP personal ADC — device code
+./administrator.sh auth work gcloud
+
+# AWS SSO — device code (requires an SSO profile; configure first if needed)
+./administrator.sh auth work aws-configure   # one-time SSO profile wizard
+./administrator.sh auth work aws             # subsequent logins
+
+# Azure personal account — device code
+./administrator.sh auth work az
+
+# GitHub — paste a PAT on stdin (non-interactive)
+printf '%s' "$MY_GITHUB_PAT" | ./administrator.sh auth work gh
 ```
 
-> **Note:** `bash -lc 'omp auth login'` may not work if `omp` is not on `PATH` in the
-> pod's login shell — drop into an interactive `bash` session and run `omp auth login`
-> directly.
+All credentials land under `$HOME` on the PVC and survive pod restarts. You only need
+to do this once per session (or when the token expires). Token lifetimes:
 
-The resulting token is written to `~/` on the pod's PVC (`omp-home`) and persists
-across pod restarts. You only need to do this once per session lifecycle.
+| Provider | On-disk location | Re-auth needed |
+|---|---|---|
+| Anthropic (`omp`) | `~/.omp/agent/agent.db` | ~30 days (refresh token) |
+| GCP (`gcloud`) | `~/.config/gcloud/` | never (refresh token doesn't expire) |
+| AWS SSO | `~/.aws/sso/cache/` | per SSO portal policy (~8–12 h) |
+| Azure | `~/.azure/` | ~90 days (refresh token) |
+| GitHub (`gh`) | `~/.config/gh/hosts.yml` | never (PAT-based) |
 
-> **Tip:** If the administrator stored the Anthropic API key with
-> `./administrator.sh vault-add model/anthropic/api-key` and the session was
-> launched with `subtrees: ["services", "model"]`, the session injects
-> `ANTHROPIC_API_KEY` and no interactive login is needed.
+**Browser-redirect flows** (some `aws configure sso` paths): use the port-forward
+helper so the redirect lands on your laptop's browser:
+
+```bash
+# Terminal 1 — forward pod port to localhost
+./administrator.sh port-forward work 8400
+# Terminal 2 — run the wizard pointing at the forwarded port
+kubectl exec -it -n omp-session-work omp -- bash -lc \
+  'aws configure sso --redirect-url http://localhost:8400/callback'
+```
+
+### Auth-broker sidecar (automatic token refresh)
+
+For long-running sessions where tokens expire and manual re-auth is disruptive, add
+`spec.authBroker: true` to the Session CR. The operator adds an `omp auth-broker serve`
+sidecar container to the pod. omp connects to it via `OMP_AUTH_BROKER_URL=http://localhost:9999`;
+the broker handles refresh automatically once initial auth is done.
+
+```bash
+kubectl apply -f - <<EOF
+apiVersion: omp.mirantis.io/v1alpha1
+kind: Session
+metadata:
+  name: work
+  namespace: omp-system
+spec:
+  subtrees: ["services"]
+  authBroker: true
+EOF
+
+# Initial auth (exec into the auth-broker container, not the omp container)
+./administrator.sh auth work anthropic auth-broker
+./administrator.sh auth work gcloud    auth-broker
+```
+
+After initial auth, the broker auto-refreshes tokens. Credentials survive pod restarts
+because the broker's SQLite database is on the shared PVC. No re-auth needed until the
+refresh token itself expires (~30 days for Anthropic, never for GCP personal accounts).
 
 ## 3. Share it
 
