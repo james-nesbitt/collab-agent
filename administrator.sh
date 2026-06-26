@@ -472,7 +472,7 @@ cmd_vault_add() {
     valid_token "${entry}" || die "Invalid entry name: ${entry}"
 
     # Derive GSM secret id and subtree label from the entry path.
-    local subtree="${entry%%/*}"
+    local subtree="${entry%/*}"
     local gsm_id; gsm_id=$(printf '%s' "${entry}" | tr '/' '-')
     local sublabel; sublabel=$(printf '%s' "${subtree}" | tr '/' '-')
 
