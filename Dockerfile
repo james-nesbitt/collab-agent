@@ -6,7 +6,7 @@ FROM ubuntu:24.04
 # Single layer for apt-cache consistency; cleanup at the end.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        tmux curl unzip git ca-certificates \
+        tmux curl unzip git ca-certificates openssh-client \
         podman slirp4netns fuse-overlayfs uidmap dbus-user-session \
         iptables && \
     # Add Docker CE apt repo
