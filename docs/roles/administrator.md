@@ -99,42 +99,66 @@ Two extra capabilities are off by default:
 restart (`kubectl delete pod omp -n omp-session-NAME` to force it immediately).
 Both capabilities run on local ONNX models (`qwen3-1.7b`), CPU-only. Expect `TUNE_OK`.
 
-## 4. Store the credentials people will need
+## 4. Store credentials
 
-Credentials live in **GCP Secret Manager** under a subtree (default `services`). Add
-one by piping the value in on **stdin** — never as an argument, so it never lands in
-your shell history or the process list:
-
-```bash
-printf '%s' "$MY_GITHUB_TOKEN" | ./administrator.sh vault-add services/github/token
-```
-
-`vault-add` is idempotent: it creates the GSM secret if absent, then adds a new secret
-version. The path is stored with labels `omp_vault=true` and
-`omp_subtree=<subtree-slug>` so the operator can enumerate it. Check what's there
-(names only, never values):
+Credentials live in **GCP Secret Manager**, organised into subtrees. `vault-add`
+prompts for the value interactively (hidden — never echoed, never in shell history):
 
 ```bash
-./administrator.sh vault-ls           # all vault entries
-./administrator.sh vault-ls services  # one subtree
+./administrator.sh vault-add shared/ollama-cloud-api-key   # prompts for value
+./administrator.sh vault-add users/jnesbitt/atlassian-token
 ```
 
-**Naming matters.** The entry path becomes an environment variable name inside the
-session: `/` and `-` become `_`, uppercased, with the subtree prefix stripped. So
-`services/github/token` → `GITHUB_TOKEN`, which matches omp's `TOKEN` pattern and is
-auto-obfuscated. End an entry with a secret keyword (`token`, `key`, `secret`,
-`password`) so obfuscation fires. If you must use a name that doesn't match, add a
-value-shape regex to `platform/secrets.yml` and re-run `setup`.
+### Subtree conventions
 
-**The `mirantis-services` skill needs two entries:**
+| Subtree | Purpose | Who gets it |
+|---|---|---|
+| `shared/` | Platform-wide credentials all sessions may need (e.g. Ollama Cloud key) | Any session with `spec.subtrees: ["shared"]` |
+| `users/<name>/` | Personal credentials scoped to one user (Atlassian, GitHub PAT) | Only sessions that explicitly include `users/<name>` in `spec.subtrees` |
+
+The `services/` subtree is retired — it conflated platform and personal credentials.
+
+### Naming and env var derivation
+
+The vault path becomes an env var inside the session pod: the subtree prefix is
+stripped, `/` and `-` become `_`, uppercased. Examples:
+
+| Vault path | GSM secret | Env var |
+|---|---|---|
+| `shared/ollama-cloud-api-key` | `shared-ollama-cloud-api-key` | `OLLAMA_CLOUD_API_KEY` |
+| `users/jnesbitt/atlassian-token` | `users-jnesbitt-atlassian-token` | `ATLASSIAN_TOKEN` |
+| `users/jnesbitt/github-token` | `users-jnesbitt-github-token` | `GITHUB_TOKEN` |
+
+End entry names with a secret keyword (`token`, `key`, `secret`, `password`) so
+omp's value obfuscation fires. Check what's stored (names only, never values):
 
 ```bash
-printf '%s' "$ATLASSIAN_EMAIL" | ./administrator.sh vault-add services/atlassian/email
-printf '%s' "$ATLASSIAN_TOKEN" | ./administrator.sh vault-add services/atlassian/token
+./administrator.sh vault-ls               # all entries
+./administrator.sh vault-ls shared        # one subtree
+./administrator.sh vault-ls users/jnesbitt
 ```
 
-They inject as `ATLASSIAN_EMAIL` / `ATLASSIAN_TOKEN`. `token` auto-obfuscates; `email`
-is not a secret.
+### Injecting credentials into a session
+
+Sessions declare what they need via `spec.subtrees`. The operator builds an
+ExternalSecret; ESO syncs the values into `omp-creds` in the session namespace.
+Only `omp-creds` is auto-injected — nothing else is copied unless explicitly declared.
+
+```yaml
+spec:
+  subtrees: ["shared", "users/jnesbitt"]  # gets OLLAMA_CLOUD_API_KEY + ATLASSIAN_* + GITHUB_TOKEN
+```
+
+### GHCR image pull secret
+
+Session pods pull images from GHCR. Keep the pull secret current whenever your
+GitHub PAT rotates (needs `read:packages` scope):
+
+```bash
+./administrator.sh pull-secret   # prompts for GitHub username and PAT (both hidden)
+```
+
+Propagates automatically to all running session namespaces.
 
 ## 5. Day to day
 

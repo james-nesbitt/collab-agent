@@ -30,8 +30,28 @@ metadata:
   name: my-session
   namespace: omp-team-<team>     # must match spec.team
 spec:
-  subtrees: ["services"]
-  team: <team>                   # operator creates omp-session-<team>-my-session
+  subtrees: ["shared"]            # platform creds (OLLAMA_CLOUD_API_KEY etc.)
+  team: <team>                    # operator creates omp-session-<team>-my-session
+  credentialSecrets:              # personal creds — self-managed K8s Secrets
+    - jnesbitt-creds              # create/rotate via kubectl, no admin needed
+```
+
+Create your personal credential secret in the team namespace:
+
+```bash
+kubectl create secret generic jnesbitt-creds -n omp-team-<team> \
+  --from-literal=ATLASSIAN_TOKEN=xxx \
+  --from-literal=ATLASSIAN_EMAIL=jnesbitt@mirantis.com
+
+# Rotate: --dry-run=client -o yaml | kubectl apply -f -
+```
+
+Multiple secrets are supported — list them in order; later entries override earlier on env var conflict.
+List available vault credential names (you have read-only access):
+
+```bash
+./administrator.sh vault-ls shared           # platform creds available to all sessions
+./administrator.sh vault-ls users/jnesbitt   # your personal entries
 ```
 
 The session pod namespace is `omp-session-<team>-<name>` (not `omp-session-<name>`).

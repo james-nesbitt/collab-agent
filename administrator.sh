@@ -16,10 +16,11 @@
 #                            master omp-config ConfigMap in omp-system (secrets.enabled,
 #                            modelRoles, portable tuning), and print SETUP_OK.
 #   vault-add ENTRY          Insert a credential into GCP Secret Manager (prompted
-#                            interactively, never echoed). Entry format: subtree/key
-#                            Shared platform creds: services/github-token
-#                            User-specific creds:   users/<name>/atlassian-token
-#   vault-ls [SUBTREE]       List vault entry NAMES only (no values).
+#                            interactively, never echoed).
+#                            Bare key (no /): auto-scoped to users/<gcloud-user>/<key>
+#                            Full path: shared/<key>  or  users/<name>/<key>
+#   vault-ls [SUBTREE]       List vault entry names (never values). No arg: shows
+#                            shared/ + users/<gcloud-user>/ entries for current user.
 #   tune [--memory] [--thinking]
 #                            Patch the master omp-config ConfigMap with opt-in tuning:
 #                            mnemopi long-term memory (--memory) and/or automatic
@@ -512,8 +513,17 @@ providers:
 
 cmd_vault_add() {
     local entry="${1:-}"
-    [[ -n "${entry}" ]] || die "Usage: ./administrator.sh vault-add ENTRY"
+    [[ -n "${entry}" ]] || die "Usage: ./administrator.sh vault-add ENTRY
+  Bare key (no /): auto-scoped to users/<gcloud-user>/<key>
+  Full path:       shared/<key>  or  users/<name>/<key>"
     valid_token "${entry}" || die "Invalid entry name: ${entry}"
+
+    # If no '/' in entry, auto-scope to the current gcloud user.
+    local gcloud_user="${ADMIN_GCP_ACCOUNT%%@*}"
+    if [[ "${entry}" != */* ]]; then
+        entry="users/${gcloud_user}/${entry}"
+        info "Auto-scoped to ${entry} (current gcloud user: ${gcloud_user})"
+    fi
 
     # Derive GSM secret id and subtree label from the entry path.
     local subtree="${entry%/*}"
@@ -524,7 +534,7 @@ cmd_vault_add() {
     local value
     if [[ -t 0 ]]; then
         read -rs -p "[admin] Value for '${entry}' (hidden): " value
-        echo ""  >&2
+        echo "" >&2
     else
         value=$(cat)
     fi
@@ -556,23 +566,31 @@ cmd_vault_add() {
         --role="roles/secretmanager.secretAccessor" \
         --quiet
 
-    ok "ADDED ${entry}"
+    ok "ADDED ${entry}  →  env var: $(printf '%s' "${entry##*/}" | tr 'a-z-' 'A-Z_' | tr -dc 'A-Z0-9_')"
 }
 
 cmd_vault_ls() {
     local subtree="${1:-}"
     [[ -z "${subtree}" ]] || valid_token "${subtree}" || die "Invalid subtree: ${subtree}"
 
-    local filter="labels.omp_vault=true"
-    if [[ -n "${subtree}" ]]; then
-        local sublabel; sublabel=$(printf '%s' "${subtree}" | tr '/' '-')
-        filter+=" AND labels.omp_subtree=${sublabel}"
-    fi
+    local gcloud_user="${ADMIN_GCP_ACCOUNT%%@*}"
 
-    gcloud secrets list \
-        --project="${GCP_PROJECT}" \
-        --filter="${filter}" \
-        --format="value(name)"
+    if [[ -z "${subtree}" ]]; then
+        # Default: show shared/ and current user's personal entries
+        info "Vault entries for user '${gcloud_user}' (shared + personal):"
+        local user_label="users-${gcloud_user}"
+        gcloud secrets list \
+            --project="${GCP_PROJECT}" \
+            --filter="labels.omp_vault=true AND (labels.omp_subtree=shared OR labels.omp_subtree=${user_label})" \
+            --format="table(name,labels.omp_subtree)"
+        info "Run 'vault-ls <subtree>' to list a specific subtree."
+    else
+        local sublabel; sublabel=$(printf '%s' "${subtree}" | tr '/' '-')
+        gcloud secrets list \
+            --project="${GCP_PROJECT}" \
+            --filter="labels.omp_vault=true AND labels.omp_subtree=${sublabel}" \
+            --format="table(name,labels.omp_subtree)"
+    fi
 }
 
 cmd_auth() {

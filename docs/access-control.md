@@ -97,7 +97,10 @@ The collab join link stays inherently joinable-by-link; this access control mode
 This is idempotent. It:
 1. Creates namespace `omp-team-<team>` with label `omp.mirantis.io/team=<team>`.
 2. Creates Role `omp-team-sessions` and RoleBinding → `group:omp-team-<team>@mirantis.com`.
-3. Grants `roles/container.clusterViewer` IAM to `group:omp-team-<team>@mirantis.com`.
+   The Role includes `sessions` CRUD **and** `secrets` CRUD so team members can manage
+   their own personal credential Secrets without admin involvement.
+3. Grants `roles/container.clusterViewer` IAM — members can `get-credentials`.
+4. Grants `roles/secretmanager.viewer` IAM — members can list vault entry names (never values).
 
 ### Team member: create a session
 
@@ -108,12 +111,59 @@ metadata:
   name: my-session
   namespace: omp-team-<team>      # must match spec.team
 spec:
-  subtrees: ["services"]
-  team: <team>                    # operator creates omp-session-<team>-my-session
+  subtrees: ["shared"]            # platform creds from vault
+  team: <team>
+  credentialSecrets:              # personal creds from K8s Secrets in this namespace
+    - my-creds
 ```
 
 The operator enforces that `spec.team` matches the CR namespace (`omp-team-<team>`).
 A CR with `spec.team: foo` created in `omp-team-bar` is rejected with status `Failed`.
+
+## Self-service session credentials
+
+Team members manage personal credentials via **K8s Secrets in their team namespace** —
+no admin or GSM access required.
+
+### Creating and referencing personal credential secrets
+
+```bash
+# Create a secret in the team namespace (team member does this themselves)
+kubectl create secret generic jnesbitt-creds -n omp-team-<team> \
+  --from-literal=ATLASSIAN_TOKEN=xxx \
+  --from-literal=ATLASSIAN_EMAIL=jnesbitt@mirantis.com
+
+# Update / rotate
+kubectl create secret generic jnesbitt-creds -n omp-team-<team> \
+  --from-literal=ATLASSIAN_TOKEN=yyy \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+Reference one or more secrets in the Session CR:
+
+```yaml
+spec:
+  subtrees: ["shared"]         # vault creds (OLLAMA_CLOUD_API_KEY etc.)
+  credentialSecrets:
+    - jnesbitt-creds           # personal creds — injected after vault, override on conflict
+    - another-secret           # multiple supported; later entries win
+```
+
+The operator copies each named Secret from `omp-team-<team>` into the session pod namespace
+and injects it via `envFrom`. Team members can also list, describe, and delete their own
+Secrets — RBAC in `omp-team-<team>` grants full secrets CRUD in that namespace only.
+
+Session pod namespaces (`omp-session-<team>-<name>`) do **not** grant team members `secrets`
+access — they can exec and view logs but never read the injected credential values directly.
+
+### Listing available vault credentials
+
+Team members have `roles/secretmanager.viewer` IAM — they can list credential names, never values:
+
+```bash
+./administrator.sh vault-ls shared           # platform creds available to all sessions
+./administrator.sh vault-ls users/jnesbitt   # personal entries for this user
+```
 
 ## Listing and removing teams
 

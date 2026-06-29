@@ -49,20 +49,25 @@ Full reference: read `docs/roles/administrator.md`.
 - **Inspect:** `status` for cluster state + nodes + sessions; `credentials` to refresh
   kubectl context.
 
-- **Add a credential:** pipe the value on stdin — never as an argument.
-  Entry path becomes env var name (`/` and `-` → `_`, uppercased, subtree prefix stripped):
-  `services/github/token` → `GITHUB_TOKEN`. End entry names with a secret keyword
-  (`token`, `key`, `secret`, `password`) so obfuscation fires.
+- **Add a credential:** run `vault-add ENTRY` — prompts interactively (hidden, never in history).
+  Subtree conventions: `shared/<key>` for platform creds all sessions may use;
+  `users/<name>/<key>` for personal creds scoped to one user.
+  Path becomes env var: subtree prefix stripped, `/`/`-` → `_`, uppercased.
+  `shared/ollama-cloud-api-key` → `OLLAMA_CLOUD_API_KEY`.
+  End names with a secret keyword (`token`, `key`, `secret`, `password`) for auto-obfuscation.
 
 - **The `mirantis-services` skill needs:**
   ```bash
-  printf '%s' '<email>' | ./administrator.sh vault-add services/atlassian/email
-  printf '%s' '<token>' | ./administrator.sh vault-add services/atlassian/token
+  ./administrator.sh vault-add users/jnesbitt/atlassian-email   # prompts for value
+  ./administrator.sh vault-add users/jnesbitt/atlassian-token
   ```
 
 - **Onboard a team:** (1) Workspace admin creates `omp-team-<team>@<domain>`, nests it
   in `gke-security-groups@<domain>`, adds members; (2) `./administrator.sh team-add <team>`.
-  This creates `omp-team-<team>` namespace + sessions RBAC + `clusterViewer` IAM.
+  Creates `omp-team-<team>` namespace + Role (sessions CRUD + secrets CRUD) +
+  `clusterViewer` IAM (kubectl access) + `secretmanager.viewer` IAM (vault-ls).
+  Team members self-manage personal credential Secrets in their namespace and reference
+  them via `spec.credentialSecrets` in Session CRs — no admin involvement for rotation.
   `provision` enables `--security-group` on the cluster (GKE Groups-for-RBAC);
   `bootstrap` adds `omp-admins@<domain>` ClusterRoleBinding. Override the domain:
   `OMP_GROUP_DOMAIN=example.com ./administrator.sh team-add myteam`.

@@ -47,20 +47,30 @@ kubectl wait --for=jsonpath='{.status.phase}'=Hosting \
 
 
 **Team session** (requires `team-add <team>` by admin first):
-```bash
-kubectl apply -f - <<EOF
+```yaml
 apiVersion: omp.mirantis.io/v1alpha1
 kind: Session
 metadata:
   name: my-session
-  namespace: omp-team-<team>     # must match spec.team
+  namespace: omp-team-<team>     # must match spec.team; CR is isolated to your namespace
 spec:
-  subtrees: ["services"]
+  subtrees: ["shared"]           # platform vault creds (e.g. OLLAMA_CLOUD_API_KEY)
   team: <team>
-EOF
+  credentialSecrets:             # personal K8s Secrets you create/rotate yourself
+    - jnesbitt-creds             # in omp-team-<team> namespace
 ```
-The join link is NOT printed by `kubectl get sessions` (LINK column removed for security).
-Retrieve it explicitly:
+Create/rotate personal creds (no admin needed):
+```bash
+kubectl create secret generic jnesbitt-creds -n omp-team-<team> \
+  --from-literal=ATLASSIAN_TOKEN=xxx --from-literal=ATLASSIAN_EMAIL=me@mirantis.com \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+List available vault credential names (never values):
+```bash
+./administrator.sh vault-ls shared           # platform creds
+./administrator.sh vault-ls users/jnesbitt   # your personal entries
+```
+The join link is NOT in `kubectl get sessions` output. Retrieve explicitly:
 ```bash
 kubectl get session my-session -n omp-team-<team> -o jsonpath='{.status.joinLink}'
 ```
