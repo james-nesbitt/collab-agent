@@ -88,6 +88,17 @@ spec:
                     Session CR MUST be created in namespace omp-team-<team>. When
                     unset (admin/shared sessions), namespace is omp-session-<name>
                     with no team binding.
+                credentialSecrets:
+                  type: array
+                  items:
+                    type: string
+                  description: >-
+                    Names of K8s Secrets in the same namespace as this Session CR.
+                    The operator copies each into the session pod namespace and injects
+                    them as env vars alongside omp-creds (later entries win on conflict).
+                    Team members create and rotate these secrets themselves via kubectl —
+                    no admin involvement required. Use for personal credentials
+                    (Atlassian, GitHub PAT, AWS keys, etc.).
             status:
               type: object
               properties:

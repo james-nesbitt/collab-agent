@@ -811,6 +811,11 @@ rules:
   - apiGroups: ["omp.mirantis.io"]
     resources: ["sessions", "sessions/status"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # Personal credential secrets: members create/manage their own K8s Secrets
+  # in this namespace and reference them via spec.credentialSecrets in Session CRs.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -831,6 +836,12 @@ EOF
     gcloud projects add-iam-policy-binding "${GCP_PROJECT}" \
         --member="group:${group}" \
         --role="roles/container.clusterViewer" \
+        --quiet
+
+    info "Granting roles/secretmanager.viewer to group ${group} (list vault entry names, never values)…"
+    gcloud projects add-iam-policy-binding "${GCP_PROJECT}" \
+        --member="group:${group}" \
+        --role="roles/secretmanager.viewer" \
         --quiet
 
     echo ""
@@ -899,6 +910,12 @@ cmd_team_rm() {
     gcloud projects remove-iam-policy-binding "${GCP_PROJECT}" \
         --member="group:${group}" \
         --role="roles/container.clusterViewer" \
+        --quiet || warn "IAM binding removal failed (may not exist)"
+
+    info "Removing roles/secretmanager.viewer IAM binding for group ${group}…"
+    gcloud projects remove-iam-policy-binding "${GCP_PROJECT}" \
+        --member="group:${group}" \
+        --role="roles/secretmanager.viewer" \
         --quiet || warn "IAM binding removal failed (may not exist)"
 
     ok "TEAM_RM_OK: ${team}"

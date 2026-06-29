@@ -270,7 +270,7 @@ def _network_policies(ns: str) -> list[dict]:
     ]
 
 
-def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_secret: bool = False, extra_env: dict | None = None, auth_broker: bool = False, broker_token: str = "") -> k8s.V1Pod:
+def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_secret: bool = False, extra_env: dict | None = None, auth_broker: bool = False, broker_token: str = "", user_creds_secrets: list | None = None) -> k8s.V1Pod:
     """
     Build the session pod manifest.
 
@@ -341,14 +341,22 @@ def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_s
                     image_pull_policy="Always",
                     env=env,
                     env_from=[
-                        # omp-creds: ESO-synced credentials from the declared spec.subtrees.
-                        # This is the only auto-injected secret; all others must be
-                        # explicitly added to spec.subtrees or spec.env.
+                        # omp-creds: ESO-synced from spec.subtrees (shared/platform creds)
                         k8s.V1EnvFromSource(
                             secret_ref=k8s.V1SecretEnvSource(
                                 name="omp-creds", optional=True
                             )
                         ),
+                        # credentialSecrets: user-managed personal creds (later entries
+                        # override earlier ones and omp-creds on conflict)
+                        *[
+                            k8s.V1EnvFromSource(
+                                secret_ref=k8s.V1SecretEnvSource(
+                                    name=s, optional=True
+                                )
+                            )
+                            for s in (user_creds_secrets or [])
+                        ],
                     ],
                     security_context=k8s.V1SecurityContext(
                         run_as_non_root=True,
@@ -631,6 +639,7 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
     extra_env: dict = dict(spec.get("env", {}))
     auth_broker: bool = bool(spec.get("authBroker", False))
     team: str = spec.get("team", "")
+    credential_secrets: list = list(spec.get("credentialSecrets", []))
     ns: str = f"omp-session-{team}-{name}" if team else f"omp-session-{name}"
 
     # Guard: team sessions must live in their own CR namespace (prevents spoofing)
@@ -664,6 +673,18 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
     has_pull_secret = _copy_secret(v1, ns, "ghcr-pull-secret")
     if has_pull_secret:
         logger.info("Copied ghcr-pull-secret into %s", ns)
+
+    # 2c. Copy each credentialSecrets entry from CR namespace → session namespace.
+    # Self-service personal credentials: team members create/rotate these K8s
+    # Secrets via kubectl; no admin or GSM involvement required.
+    # Later entries in the list win on env var conflicts.
+    copied_user_secrets: list[str] = []
+    for secret_name in credential_secrets:
+        if _copy_secret(v1, ns, secret_name, src_ns=namespace):
+            copied_user_secrets.append(secret_name)
+            logger.info("Copied credentialSecret '%s' from %s into %s", secret_name, namespace, ns)
+        else:
+            logger.warning("credentialSecret '%s' not found in %s — skipping", secret_name, namespace)
 
     # 3. PVC
     _create_or_skip(v1.create_namespaced_persistent_volume_claim, ns, _pvc(ns))
@@ -719,7 +740,7 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
             broker_token = _ensure_broker_token_secret(v1, ns)
             patch.status["authBrokerUrl"] = "http://localhost:9999"
             logger.info("Auth-broker enabled for session %s (token stored in auth-broker-token secret)", name)
-        _create_or_skip(v1.create_namespaced_pod, ns, _pod(ns, name, desired_image, has_cm, has_pull_secret, extra_env, auth_broker=auth_broker, broker_token=broker_token))
+        _create_or_skip(v1.create_namespaced_pod, ns, _pod(ns, name, desired_image, has_cm, has_pull_secret, extra_env, auth_broker=auth_broker, broker_token=broker_token, user_creds_secrets=copied_user_secrets))
         created = True
         patch.status["restartedAt"] = restart_nonce or ""
 
