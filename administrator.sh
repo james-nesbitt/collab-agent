@@ -583,7 +583,13 @@ cmd_auth() {
     [[ -n "${provider}" ]] || die "Usage: ./administrator.sh auth NAME PROVIDER [CONTAINER]"
     require_cluster
 
-    local ns="omp-session-${name}"
+    # Derive pod namespace from session status — handles both admin (omp-session-<name>)
+    # and team sessions (omp-session-<team>-<name>) without hardcoding the pattern.
+    local ns
+    ns=$(kubectl get sessions --all-namespaces \
+         -o jsonpath="{.items[?(@.metadata.name=='${name}')].status.namespace}" 2>/dev/null \
+         | tr ' ' '\n' | head -1)
+    [[ -n "${ns}" ]] || die "Session '${name}' not found or has no status.namespace yet"
     local kctl_exec="kubectl exec -it -n ${ns} -c ${container} omp -- bash -lc"
 
     case "${provider}" in
@@ -642,7 +648,11 @@ cmd_port_forward() {
     [[ -n "${local_port}" ]] || die "Usage: ./administrator.sh port-forward NAME LOCAL_PORT [REMOTE_PORT]"
     require_cluster
 
-    local ns="omp-session-${name}"
+    local ns
+    ns=$(kubectl get sessions --all-namespaces \
+         -o jsonpath="{.items[?(@.metadata.name=='${name}')].status.namespace}" 2>/dev/null \
+         | tr ' ' '\n' | head -1)
+    [[ -n "${ns}" ]] || die "Session '${name}' not found or has no status.namespace yet"
     info "Forwarding localhost:${local_port} → pod omp in ${ns}:${remote_port}"
     info "Press Ctrl-C to stop."
     kubectl port-forward -n "${ns}" pod/omp "${local_port}:${remote_port}"
