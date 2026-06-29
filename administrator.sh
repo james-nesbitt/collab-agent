@@ -25,6 +25,16 @@
 #                            mnemopi long-term memory (--memory) and/or automatic
 #                            thinking-level selection (--thinking). No flag = both.
 #                            New sessions pick it up; running pods on next restart.
+#   auth NAME PROVIDER [CONTAINER]
+#                            Interactive provider login INSIDE a session pod (device code
+#                            or token on stdin). Providers: anthropic gcloud aws
+#                            aws-configure az gh. Credentials persist on the session PVC.
+#   port-forward NAME LOCAL_PORT [REMOTE_PORT]
+#                            Forward a session pod port to localhost (for browser-redirect
+#                            OAuth, e.g. aws configure sso).
+#   session-transfer NAME [LOCAL_DIR] [SESSION_ID]
+#                            Copy a local omp session onto a GKE session pod's PVC so the
+#                            conversation resumes there.
 #   help                     Show this help
 #
 # Session lifecycle (new/login/attach/list/kill/collab) is handled directly with

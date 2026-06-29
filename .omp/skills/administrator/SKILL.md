@@ -31,6 +31,9 @@ Full reference: read `docs/roles/administrator.md`.
 | Tune local-model features (mnemopi, auto thinking) | `./administrator.sh tune [--memory] [--thinking]` (no flag = both) |
 | Store a credential (value on **stdin**) | `printf '%s' "$VAL" \| ./administrator.sh vault-add services/github/token` |
 | List vault entry NAMES (never values) | `./administrator.sh vault-ls [SUBTREE]` |
+| Auth a provider inside a session pod | `./administrator.sh auth NAME PROVIDER` (anthropic·gcloud·aws·aws-configure·az·gh) |
+| Port-forward a session pod to localhost | `./administrator.sh port-forward NAME LOCAL_PORT` |
+| Transfer a local omp session onto a pod PVC | `./administrator.sh session-transfer NAME [LOCAL_DIR] [SESSION_ID]` |
 
 `provision`, `bootstrap`, `credentials`, and `setup` are idempotent.
 
@@ -87,45 +90,26 @@ kubectl create secret generic omp-bootstrap-env \
 receives `#XXXX#`, never the raw value. Already-running sessions are unaffected;
 new sessions created after the secret exists pick it up automatically.
 
-## Anthropic OAuth injection (anthropic-oauth)
+## Per-session provider auth
 
-`anthropic-oauth` is a K8s Secret in `omp-system` copied into every session namespace
-at creation. It injects `ANTHROPIC_OAUTH_TOKEN` and `ANTHROPIC_REFRESH_TOKEN` as env
-vars — omp reads `ANTHROPIC_OAUTH_TOKEN` directly and bypasses the setup wizard.
-Both secrets are injected automatically; no session CR changes needed.
-
-Create from your local `~/.omp/agent/agent.db` (requires an active `omp auth login`
-on this machine):
+Interactive logins (Anthropic, gcloud, AWS SSO, Azure) and a GitHub PAT are completed
+**inside a session pod** — not cluster-wide — via `./administrator.sh auth NAME PROVIDER`:
 
 ```bash
-./administrator.sh anthropic-login
+./administrator.sh auth work anthropic       # device code — visit the URL in your browser
+./administrator.sh auth work gcloud          # device code → gcloud ADC on the PVC
+./administrator.sh auth work aws-configure   # one-time SSO profile wizard, then: auth work aws
+./administrator.sh auth work az              # device code
+printf '%s' "$PAT" | ./administrator.sh auth work gh   # PAT on stdin (never argv)
 ```
 
-If `anthropic-login` is not yet a subcommand, use the one-liner (value never printed):
-
-```bash
-python3 - ~/.omp/agent/agent.db omp-system <<'PY'
-import sqlite3, json, sys, subprocess
-db = sqlite3.connect(sys.argv[1])
-row = db.execute(
-    "SELECT data FROM auth_credentials WHERE provider='anthropic' "
-    "AND credential_type='oauth' AND disabled_cause IS NULL "
-    "ORDER BY updated_at DESC LIMIT 1"
-).fetchone()
-if not row: sys.exit("No active Anthropic credential — run: omp auth login anthropic")
-d = json.loads(row[0])
-ns = sys.argv[2]
-subprocess.run(["kubectl","create","secret","generic","anthropic-oauth",
-    "-n", ns,
-    f"--from-literal=ANTHROPIC_OAUTH_TOKEN={d['access']}",
-    f"--from-literal=ANTHROPIC_REFRESH_TOKEN={d['refresh']}",
-    "--dry-run=client","-o","yaml"], check=True, capture_output=False)
-PY | kubectl apply -f -
-```
-
-Access tokens expire in ~24 h. Rotate by re-running the command above after
-re-authenticating locally. Running sessions pick up the new token on next pod restart;
-new sessions get it immediately.
+Credentials land under `$HOME` on the session PVC and survive pod restarts. For
+browser-redirect flows (e.g. `aws configure sso`) use
+`./administrator.sh port-forward NAME LOCAL_PORT`. These are session-scoped operations —
+the full workflow (including the `spec.authBroker` sidecar for automatic token refresh)
+lives in the `manager` skill. Cluster-wide static keys that every session needs (e.g. a
+Gemini API key) go through `omp-bootstrap-env` above; per-user/per-session secrets go
+through `vault-add`.
 
 ## Guardrails
 
