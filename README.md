@@ -66,8 +66,9 @@ spec:
 EOF
 kubectl wait --for=jsonpath='{.status.phase}'=Hosting session/work -n omp-system --timeout=180s
 # Preferred: if omp-bootstrap-env is present (step 2.5) the session starts automatically
-# and the join link is ready — do Anthropic OAuth from inside via /auth login or the omp TUI.
-# Fallback (no bootstrap env): kubectl exec -it -n omp-session-work omp -- bash  then: omp auth login
+# and the join link is ready; complete Anthropic OAuth with:
+#   ./administrator.sh auth work anthropic   # device code — visit the URL in your browser
+# (token persists on the session PVC). Other providers: gcloud · aws · az · gh (PAT on stdin).
 kubectl get session work -n omp-system -o jsonpath='{.status.joinLink}'  # prints join link
 ```
 
