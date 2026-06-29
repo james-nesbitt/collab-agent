@@ -906,24 +906,25 @@ cmd_team_rm() {
 
 cmd_pull_secret() {
     # pull-secret — update the GHCR image pull secret.
-    # Prompts for a GitHub PAT (hidden, not echoed). Needs read:packages scope.
+    # Prompts for GitHub username and PAT (PAT hidden, not echoed).
+    # PAT needs read:packages scope.
     # Updates omp-system and propagates to all running session namespaces.
     require_cluster
 
-    local token
-    if [[ -t 0 ]]; then
-        read -rs -p "[admin] GitHub PAT for GHCR (hidden): " token
-        echo "" >&2
-    else
-        token=$(cat)
-    fi
+    local username token
+    read -r -p "[admin] GitHub username [${GHCR_USERNAME}]: " username
+    username="${username:-${GHCR_USERNAME}}"
+    [[ -n "${username}" ]] || die "No GitHub username provided"
+
+    read -rs -p "[admin] GitHub PAT for '${username}' (hidden): " token
+    echo "" >&2
     [[ -n "${token}" ]] || die "No token provided"
 
-    info "Updating ghcr-pull-secret in omp-system (user: ${GHCR_USERNAME})…"
+    info "Updating ghcr-pull-secret in omp-system (user: ${username})…"
     kubectl create secret docker-registry ghcr-pull-secret \
         -n omp-system \
         --docker-server=ghcr.io \
-        --docker-username="${GHCR_USERNAME}" \
+        --docker-username="${username}" \
         --docker-password="${token}" \
         --dry-run=client -o yaml | kubectl apply -f -
 
@@ -935,7 +936,7 @@ cmd_pull_secret() {
         kubectl create secret docker-registry ghcr-pull-secret \
             -n "${ns}" \
             --docker-server=ghcr.io \
-            --docker-username="${GHCR_USERNAME}" \
+            --docker-username="${username}" \
             --docker-password="${token}" \
             --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1 && updated=$((updated + 1))
     done
