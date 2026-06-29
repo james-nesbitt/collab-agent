@@ -134,7 +134,7 @@ def _team_rolebinding(ns: str, team: str) -> k8s.V1RoleBinding:
             name="omp-session-user",
         ),
         subjects=[
-            k8s.V1Subject(
+            k8s.RbacV1Subject(
                 kind="Group",
                 api_group="rbac.authorization.k8s.io",
                 name=f"omp-team-{team}@{OMP_GROUP_DOMAIN}",

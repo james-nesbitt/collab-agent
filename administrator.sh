@@ -583,13 +583,17 @@ cmd_auth() {
     [[ -n "${provider}" ]] || die "Usage: ./administrator.sh auth NAME PROVIDER [CONTAINER]"
     require_cluster
 
-    # Derive pod namespace from session status — handles both admin (omp-session-<name>)
-    # and team sessions (omp-session-<team>-<name>) without hardcoding the pattern.
-    local ns
-    ns=$(kubectl get sessions --all-namespaces \
-         -o jsonpath="{.items[?(@.metadata.name=='${name}')].status.namespace}" 2>/dev/null \
-         | tr ' ' '\n' | head -1)
-    [[ -n "${ns}" ]] || die "Session '${name}' not found or has no status.namespace yet"
+    # Derive pod namespace from session status — works for admin and team sessions.
+    # Iterates all namespaces that could hold a Session CR (omp-system + omp-team-*),
+    # avoiding unreliable cross-namespace jsonpath ?() filtering in kubectl.
+    local ns cr_ns
+    for cr_ns in $(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}' \
+                   | tr ' ' '\n' | grep -E '^omp-system$|^omp-team-'); do
+        ns=$(kubectl get session "${name}" -n "${cr_ns}" \
+             -o jsonpath='{.status.namespace}' 2>/dev/null || true)
+        [[ -n "${ns}" ]] && break
+    done
+    [[ -n "${ns}" ]] || die "Session '${name}' not found or has no status.namespace yet (still provisioning?)"
     local kctl_exec="kubectl exec -it -n ${ns} -c ${container} omp -- bash -lc"
 
     case "${provider}" in
@@ -644,15 +648,14 @@ cmd_port_forward() {
     local name="${1:-}"
     local local_port="${2:-}"
     local remote_port="${3:-${local_port}}"
-    [[ -n "${name}" ]]       || die "Usage: ./administrator.sh port-forward NAME LOCAL_PORT [REMOTE_PORT]"
-    [[ -n "${local_port}" ]] || die "Usage: ./administrator.sh port-forward NAME LOCAL_PORT [REMOTE_PORT]"
-    require_cluster
-
-    local ns
-    ns=$(kubectl get sessions --all-namespaces \
-         -o jsonpath="{.items[?(@.metadata.name=='${name}')].status.namespace}" 2>/dev/null \
-         | tr ' ' '\n' | head -1)
-    [[ -n "${ns}" ]] || die "Session '${name}' not found or has no status.namespace yet"
+    local ns cr_ns
+    for cr_ns in $(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}' \
+                   | tr ' ' '\n' | grep -E '^omp-system$|^omp-team-'); do
+        ns=$(kubectl get session "${name}" -n "${cr_ns}" \
+             -o jsonpath='{.status.namespace}' 2>/dev/null || true)
+        [[ -n "${ns}" ]] && break
+    done
+    [[ -n "${ns}" ]] || die "Session '${name}' not found or has no status.namespace yet (still provisioning?)"
     info "Forwarding localhost:${local_port} → pod omp in ${ns}:${remote_port}"
     info "Press Ctrl-C to stop."
     kubectl port-forward -n "${ns}" pod/omp "${local_port}:${remote_port}"
