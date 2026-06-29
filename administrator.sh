@@ -26,6 +26,11 @@
 #                            mnemopi long-term memory (--memory) and/or automatic
 #                            thinking-level selection (--thinking). No flag = both.
 #                            New sessions pick it up; running pods on next restart.
+#   user-add <name>          Create omp-user-<name> namespace; bind <name>@<domain>
+#                            to secrets CRUD there. Users self-manage personal
+#                            credential K8s Secrets and reference them in sessions via
+#                            spec.credentialSecrets: ["<name>/<secret>"].
+#   user-rm <name>           Prompt, then delete omp-user-<name> and remove IAM.
 #   team-add <team>          Idempotent: create omp-team-<team> namespace, Session
 #                            CRUD Role+RoleBinding for omp-team-<team>@<domain> group,
 #                            and grant roles/container.clusterViewer IAM to the group.
@@ -797,6 +802,103 @@ cmd_session_transfer() {
 }
 
 # ---------------------------------------------------------------------------
+# User credential namespace subcommands
+# ---------------------------------------------------------------------------
+
+cmd_user_add() {
+    # user-add <name> — create omp-user-<name> namespace; bind <name>@<domain> to
+    # secrets CRUD there so the user can self-manage personal credential K8s Secrets.
+    local username="${1:-}"
+    [[ -n "${username}" ]] || die "Usage: ./administrator.sh user-add <username>"
+    valid_team "${username}" || die "Invalid username '${username}': must be a DNS-label-safe slug (e.g. jnesbitt)"
+    require_cluster
+    local ns="omp-user-${username}"
+    local email="${username}@${OMP_GROUP_DOMAIN}"
+
+    info "Creating personal credential namespace '${ns}' for ${email}…"
+    kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${ns}
+  labels:
+    omp.mirantis.io/user: "${username}"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: omp-user-creds
+  namespace: ${ns}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: omp-user-creds
+  namespace: ${ns}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: omp-user-creds
+subjects:
+  - kind: User
+    apiGroup: rbac.authorization.k8s.io
+    name: ${email}
+EOF
+
+    info "Granting roles/secretmanager.viewer to ${email} (vault-ls support)…"
+    gcloud projects add-iam-policy-binding "${GCP_PROJECT}" \
+        --member="user:${email}" \
+        --role="roles/secretmanager.viewer" \
+        --quiet
+
+    echo ""
+    echo "USER_ADD_OK: ${username}"
+    echo "  Namespace : ${ns}  (only ${email} has secrets CRUD here)"
+    echo ""
+    echo "  User creates personal credential secrets:"
+    echo "    kubectl create secret generic my-creds -n ${ns} \\"
+    echo "      --from-literal=ATLASSIAN_TOKEN=xxx"
+    echo ""
+    echo "  Session CR references them as:"
+    echo "    spec:"
+    echo "      credentialSecrets:"
+    echo "        - ${username}/my-creds"
+}
+
+cmd_user_rm() {
+    local username="${1:-}"
+    [[ -n "${username}" ]] || die "Usage: ./administrator.sh user-rm <username>"
+    valid_team "${username}" || die "Invalid username: ${username}"
+    require_cluster
+    local ns="omp-user-${username}"
+    local email="${username}@${OMP_GROUP_DOMAIN}"
+
+    echo ""
+    echo "WARNING: This will delete namespace '${ns}' and all secrets within it."
+    read -r -p "Type 'yes' to confirm: " confirm
+    [[ "${confirm}" == "yes" ]] || { info "Aborted."; exit 0; }
+
+    if kubectl get namespace "${ns}" >/dev/null 2>&1; then
+        info "Deleting namespace ${ns}…"
+        kubectl delete namespace "${ns}"
+    else
+        info "Namespace ${ns} not found — skipping."
+    fi
+
+    info "Removing roles/secretmanager.viewer IAM binding for ${email}…"
+    gcloud projects remove-iam-policy-binding "${GCP_PROJECT}" \
+        --member="user:${email}" \
+        --role="roles/secretmanager.viewer" \
+        --quiet || warn "IAM binding removal failed (may not exist)"
+
+    ok "USER_RM_OK: ${username}"
+}
+
+# ---------------------------------------------------------------------------
 # Team management subcommands
 # ---------------------------------------------------------------------------
 
@@ -828,11 +930,6 @@ metadata:
 rules:
   - apiGroups: ["omp.mirantis.io"]
     resources: ["sessions", "sessions/status"]
-    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
-  # Personal credential secrets: members create/manage their own K8s Secrets
-  # in this namespace and reference them via spec.credentialSecrets in Session CRs.
-  - apiGroups: [""]
-    resources: ["secrets"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -1003,6 +1100,8 @@ case "${SUBCOMMAND}" in
     auth)             cmd_auth "$@" ;;
     port-forward)     cmd_port_forward "$@" ;;
     session-transfer) cmd_session_transfer "$@" ;;
+    user-add)         cmd_user_add "$@" ;;
+    user-rm)          cmd_user_rm "$@" ;;
     team-add)         cmd_team_add "$@" ;;
     team-ls)          cmd_team_ls "$@" ;;
     team-rm)          cmd_team_rm "$@" ;;

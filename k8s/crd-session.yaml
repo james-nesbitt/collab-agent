@@ -38,8 +38,9 @@ spec:
                   type: array
                   items:
                     type: string
-                  default:
-                    - services
+                  description: >-
+                    Deprecated — use credentialSecrets instead. Retained for
+                    backward compatibility with existing sessions only.
                 view:
                   type: boolean
                   default: false
@@ -92,13 +93,15 @@ spec:
                   type: array
                   items:
                     type: string
+                    pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?/[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
                   description: >-
-                    Names of K8s Secrets in the same namespace as this Session CR.
-                    The operator copies each into the session pod namespace and injects
-                    them as env vars alongside omp-creds (later entries win on conflict).
-                    Team members create and rotate these secrets themselves via kubectl —
-                    no admin involvement required. Use for personal credentials
-                    (Atlassian, GitHub PAT, AWS keys, etc.).
+                    Personal credentials to inject into the session pod.
+                    Format: "<user>/<secret-name>" — the operator reads secret
+                    <secret-name> from namespace omp-user-<user>. Only secrets
+                    in that user's own namespace are accessible; users cannot
+                    reference another user's credentials. Later entries win on
+                    env var conflict. Example: ["jnesbitt/atlassian-token",
+                    "jnesbitt/ollama-key"]
             status:
               type: object
               properties:

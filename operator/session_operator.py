@@ -667,35 +667,27 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
     _create_or_skip(v1.create_namespaced_service_account, ns, _service_account(ns))
 
     # 2b. Copy ghcr-pull-secret from omp-system so pods can pull from GHCR.
-    # No other secrets are auto-injected — sessions receive only what their
-    # spec.subtrees declare via ESO. User-specific credentials (gh, atlassian,
-    # anthropic) must be explicitly requested per session.
     has_pull_secret = _copy_secret(v1, ns, "ghcr-pull-secret")
     if has_pull_secret:
         logger.info("Copied ghcr-pull-secret into %s", ns)
 
-    # 2c. Copy each credentialSecrets entry from CR namespace → session namespace.
-    # Self-service personal credentials: team members create/rotate these K8s
-    # Secrets via kubectl; no admin or GSM involvement required.
-    # Later entries in the list win on env var conflicts.
+    # 2c. Copy personal credential secrets from omp-user-<user> namespaces.
+    # Format: "<user>/<secret-name>" — reads secret <secret-name> from namespace
+    # omp-user-<user>. Each user only controls their own omp-user-<user> namespace
+    # so they cannot reference another user's credentials.
     copied_user_secrets: list[str] = []
-    for secret_name in credential_secrets:
-        if _copy_secret(v1, ns, secret_name, src_ns=namespace):
+    for entry in credential_secrets:
+        if "/" not in entry:
+            logger.warning("credentialSecret '%s' has no user prefix (expected <user>/<secret>) — skipping", entry)
+            continue
+        cred_user, secret_name = entry.split("/", 1)
+        src_ns = f"omp-user-{cred_user}"
+        if _copy_secret(v1, ns, secret_name, src_ns=src_ns):
             copied_user_secrets.append(secret_name)
-            logger.info("Copied credentialSecret '%s' from %s into %s", secret_name, namespace, ns)
+            logger.info("Copied credentialSecret '%s' from %s into %s", secret_name, src_ns, ns)
         else:
-            logger.warning("credentialSecret '%s' not found in %s — skipping", secret_name, namespace)
+            logger.warning("credentialSecret '%s' not found in %s — skipping", secret_name, src_ns)
 
-    # 3. PVC
-    _create_or_skip(v1.create_namespaced_persistent_volume_claim, ns, _pvc(ns))
-
-    # 4. ExternalSecret — skip if no data entries (ESO rejects empty data/dataFrom)
-    es = _external_secret(ns, subtrees, OMP_GSM_PROJECT)
-    if not es["spec"]["data"]:
-        logger.warning("No GSM secrets matched subtrees %s for session %s; skipping ExternalSecret", subtrees, name)
-        patch.status["message"] = "no credentials matched subtrees"
-    else:
-        _apply_custom_object("external-secrets.io", "v1", ns, "externalsecrets", es)
 
     cm = _configmap_from_master(ns, config_ref)
     has_cm = cm is not None
