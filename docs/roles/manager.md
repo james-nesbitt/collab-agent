@@ -18,6 +18,37 @@ platform config and vault operations use `./administrator.sh`.
   Deployment is Available.
 - No GPG key, no vault passphrase, no vault init.
 
+## Team sessions
+
+If your team has been onboarded (Workspace group created, `team-add` run by the admin),
+create sessions in your team's namespace with `spec.team`:
+
+```yaml
+apiVersion: omp.mirantis.io/v1alpha1
+kind: Session
+metadata:
+  name: my-session
+  namespace: omp-team-<team>     # must match spec.team
+spec:
+  subtrees: ["services"]
+  team: <team>                   # operator creates omp-session-<team>-my-session
+```
+
+The session pod namespace is `omp-session-<team>-<name>` (not `omp-session-<name>`).
+Team members have `pods/exec` and `pods/log` in that namespace — no secrets access.
+
+The LINK column is removed from `kubectl get sessions` output. Retrieve the join link
+explicitly:
+
+```bash
+kubectl get session my-session -n omp-team-<team> -o jsonpath='{.status.joinLink}'
+```
+
+Self-service stop/start/delete works identically to admin sessions — scoped to your
+team's namespace. You cannot touch sessions in another team's namespace.
+
+See [docs/access-control.md](../access-control.md) for the full access model.
+
 ## 1. Launch a session
 
 ```bash

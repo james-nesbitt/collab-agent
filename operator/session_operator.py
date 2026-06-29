@@ -31,6 +31,7 @@ OMP_SESSION_IMAGE: str = os.environ.get(
 )
 OMP_GSM_PROJECT: str = os.environ.get("OMP_GSM_PROJECT", "")
 OMP_RELAY: str = os.environ.get("OMP_RELAY", "")
+OMP_GROUP_DOMAIN: str = os.environ.get("OMP_GROUP_DOMAIN", "mirantis.com")
 
 GROUP = "omp.mirantis.io"
 VERSION = "v1alpha1"
@@ -102,14 +103,44 @@ def list_gsm_secrets(project: str, subtree: str) -> list[dict]:
 # Kubernetes object builders
 # ---------------------------------------------------------------------------
 
-def _namespace(ns: str, session_name: str) -> k8s.V1Namespace:
+def _namespace(ns: str, session_name: str, team: str = "") -> k8s.V1Namespace:
+    labels: dict = {"omp.mirantis.io/session": session_name}
+    if team:
+        labels["omp.mirantis.io/team"] = team
     return k8s.V1Namespace(
-        metadata=k8s.V1ObjectMeta(
-            name=ns,
-            labels={"omp.mirantis.io/session": session_name},
-        )
+        metadata=k8s.V1ObjectMeta(name=ns, labels=labels)
     )
 
+
+def _team_role(ns: str) -> k8s.V1Role:
+    """Role granting a team exec/log access to pods in a session namespace (not secrets)."""
+    return k8s.V1Role(
+        metadata=k8s.V1ObjectMeta(name="omp-session-user", namespace=ns),
+        rules=[
+            k8s.V1PolicyRule(api_groups=[""], resources=["pods"], verbs=["get", "list", "watch"]),
+            k8s.V1PolicyRule(api_groups=[""], resources=["pods/exec"], verbs=["create"]),
+            k8s.V1PolicyRule(api_groups=[""], resources=["pods/log"], verbs=["get"]),
+        ],
+    )
+
+
+def _team_rolebinding(ns: str, team: str) -> k8s.V1RoleBinding:
+    """Bind the omp-session-user Role to the team's Google Group in a session namespace."""
+    return k8s.V1RoleBinding(
+        metadata=k8s.V1ObjectMeta(name="omp-session-user", namespace=ns),
+        role_ref=k8s.V1RoleRef(
+            api_group="rbac.authorization.k8s.io",
+            kind="Role",
+            name="omp-session-user",
+        ),
+        subjects=[
+            k8s.V1Subject(
+                kind="Group",
+                api_group="rbac.authorization.k8s.io",
+                name=f"omp-team-{team}@{OMP_GROUP_DOMAIN}",
+            )
+        ],
+    )
 
 def _service_account(ns: str) -> k8s.V1ServiceAccount:
     # Not WI-annotated: session pods have no cloud identity.
@@ -606,15 +637,29 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
     config_ref: str = spec.get("configRef", "omp-config")
     extra_env: dict = dict(spec.get("env", {}))
     auth_broker: bool = bool(spec.get("authBroker", False))
-    ns: str = f"omp-session-{name}"
+    team: str = spec.get("team", "")
+    ns: str = f"omp-session-{team}-{name}" if team else f"omp-session-{name}"
+
+    # Guard: team sessions must live in their own CR namespace (prevents spoofing)
+    if team and namespace != f"omp-team-{team}":
+        _patch_cr_status(namespace, name, phase="Failed",
+                         message=f"spec.team '{team}' requires CR namespace omp-team-{team}")
+        return
 
     _patch_cr_status(namespace, name, phase="Provisioning")
 
     v1 = k8s.CoreV1Api()
 
     # 1. Namespace
-    _create_or_skip(v1.create_namespace, _namespace(ns, name))
+    _create_or_skip(v1.create_namespace, _namespace(ns, name, team))
     logger.info("Namespace %s ready", ns)
+
+    # 1b. Team RBAC: grant team group exec/log in session namespace (not secrets)
+    if team:
+        rbac = k8s.RbacAuthorizationV1Api()
+        _create_or_skip(rbac.create_namespaced_role, ns, _team_role(ns))
+        _create_or_skip(rbac.create_namespaced_role_binding, ns, _team_rolebinding(ns, team))
+        logger.info("Bound team %s to namespace %s (exec/log)", team, ns)
 
     # 2. ServiceAccount
     _create_or_skip(v1.create_namespaced_service_account, ns, _service_account(ns))
@@ -729,15 +774,16 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
 # ---------------------------------------------------------------------------
 # Delete handler
 # ---------------------------------------------------------------------------
-
 @kopf.on.delete(GROUP, VERSION, PLURAL)
-def delete(name, patch, logger, **_) -> None:
+def delete(name, spec, status, patch, logger, **_) -> None:
     """
     Delete the session namespace.  All session resources (PVC, Secret,
     ExternalSecret, NetworkPolicies, Pod, ConfigMap, SA) cascade automatically
     because they live inside that namespace.
     """
-    ns = f"omp-session-{name}"
+    team: str = (spec or {}).get("team", "")
+    ns: str = ((status or {}).get("namespace")
+               or (f"omp-session-{team}-{name}" if team else f"omp-session-{name}"))
     patch.status["phase"] = "Terminating"
     v1 = k8s.CoreV1Api()
     try:
@@ -765,7 +811,8 @@ def on_recapture(spec, name, namespace, old, new, logger, **_) -> None:
     if new_val is None or new_val == old_val:
         return  # annotation absent or unchanged — not a recapture request
 
-    ns = f"omp-session-{name}"
+    team: str = spec.get("team", "")
+    ns = f"omp-session-{team}-{name}" if team else f"omp-session-{name}"
     view: bool = bool(spec.get("view", False))
     logger.info("Recapture requested for session %s", name)
 

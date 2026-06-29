@@ -99,9 +99,12 @@ All defaults are overridable via env vars. Key ones:
 | `OMP_REGISTRY` | `ghcr.io/james-nesbitt/collab-agent` | Image registry |
 | `OMP_IMAGE_TAG` | `latest` | Image tag |
 | `ADMIN_GCP_ACCOUNT` | current gcloud account | Account granted cluster-admin |
+| `OMP_GROUP_DOMAIN` | `mirantis.com` | Workspace domain for RBAC groups |
 
 ## Roles
 
 - [Administrator guide](docs/roles/administrator.md)
 - [Manager guide](docs/roles/manager.md)
 - [Operator guide](docs/roles/operator.md)
+- [Access control](docs/access-control.md) — GCP IAM + Kubernetes RBAC + team onboarding
+  (requires `gke-security-groups@mirantis.com` + per-team Google Groups in Workspace)

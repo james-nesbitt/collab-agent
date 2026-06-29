@@ -20,7 +20,7 @@ before this architecture was written. No GPG vault remains.
 | F03 | High     | ESO SA has project-wide secretAccessor (all GSM)   | **Fixed** |
 | F04 | Medium   | Helm ESO chart installed without `--version` pin   | Open      |
 | F05 | Medium   | OCI image tags default to `latest` (no digest)     | Open      |
-| F06 | Medium   | Collab join link stored in plain-text CR status    | Open      |
+| F06 | Medium   | Collab join link stored in plain-text CR status    | **Addressed** |
 | F07 | Medium   | RFC 6598 (100.64.0.0/10) missing from egress except | Open     |
 | F08 | Medium   | k8s manifests contain raw `${VAR}` — unsafe direct apply | Open |
 | F09 | Low      | Session pod auto-mounts an unused SA token         | Open      |
@@ -301,6 +301,13 @@ observe all injected credential values that the host agent handles.
 3. Require explicit `kubectl get session <name> -o jsonpath='{.status.joinLink}'` for
    retrieval, which at least requires deliberate intent rather than appearing in table
    output.
+
+**Status: Addressed (2026-06-29).** Fix option 1 applied: the LINK printer column
+removed from `k8s/crd-session.yaml` `additionalPrinterColumns`. Combined with per-team
+CR namespaces (`omp-team-<team>`) added in this PR, team members can only `get sessions`
+in their own namespace — they never see another team's links. The link is still
+retrievable explicitly: `kubectl get session <name> -n <ns> -o jsonpath='{.status.joinLink}'`.
+Fix option 2 (K8s Secret) was deferred as out of scope for this iteration.
 
 ─
 

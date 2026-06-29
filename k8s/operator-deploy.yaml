@@ -25,6 +25,8 @@ spec:
               value: "${GCP_PROJECT}"
             - name: OMP_RELAY
               value: ""
+            - name: OMP_GROUP_DOMAIN
+              value: "${OMP_GROUP_DOMAIN}"
           resources:
             requests:
               cpu: 100m

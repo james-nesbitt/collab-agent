@@ -1,6 +1,6 @@
 ---
 name: administrator
-description: Act as the administrator for the GKE cluster from this repo — provision the cluster + IAM, bootstrap the platform runtime (ESO, operator), check status, get credentials, destroy, configure the platform (setup/tune), and manage the credential vault (vault-add/vault-ls). Use when the user asks to create, stand up, bootstrap, check on, get credentials for, or tear down the GKE cluster; configure omp; or add/list credentials in the vault. For session lifecycle (new/login/attach/kill/collab) use the `manager` skill.
+description: Act as the administrator for the GKE cluster from this repo — provision the cluster + IAM, bootstrap the platform runtime (ESO, operator), check status, get credentials, destroy, configure the platform (setup/tune), manage the credential vault (vault-add/vault-ls), and onboard/manage teams (team-add/team-ls/team-rm). Use when the user asks to create, stand up, bootstrap, check on, get credentials for, or tear down the GKE cluster; configure omp; add/list credentials in the vault; or add/list/remove a team. For session lifecycle (new/login/attach/kill/collab) use the `manager` skill.
 ---
 
 # Administrator
@@ -34,6 +34,9 @@ Full reference: read `docs/roles/administrator.md`.
 | Auth a provider inside a session pod | `./administrator.sh auth NAME PROVIDER` (anthropic·gcloud·aws·aws-configure·az·gh) |
 | Port-forward a session pod to localhost | `./administrator.sh port-forward NAME LOCAL_PORT` |
 | Transfer a local omp session onto a pod PVC | `./administrator.sh session-transfer NAME [LOCAL_DIR] [SESSION_ID]` |
+| Onboard a team (idempotent) | `./administrator.sh team-add <team>` |
+| List teams and bound groups | `./administrator.sh team-ls` |
+| Remove a team | `./administrator.sh team-rm <team>` (prompts; warns if sessions exist) |
 
 `provision`, `bootstrap`, `credentials`, and `setup` are idempotent.
 
@@ -56,6 +59,14 @@ Full reference: read `docs/roles/administrator.md`.
   printf '%s' '<email>' | ./administrator.sh vault-add services/atlassian/email
   printf '%s' '<token>' | ./administrator.sh vault-add services/atlassian/token
   ```
+
+- **Onboard a team:** (1) Workspace admin creates `omp-team-<team>@<domain>`, nests it
+  in `gke-security-groups@<domain>`, adds members; (2) `./administrator.sh team-add <team>`.
+  This creates `omp-team-<team>` namespace + sessions RBAC + `clusterViewer` IAM.
+  `provision` enables `--security-group` on the cluster (GKE Groups-for-RBAC);
+  `bootstrap` adds `omp-admins@<domain>` ClusterRoleBinding. Override the domain:
+  `OMP_GROUP_DOMAIN=example.com ./administrator.sh team-add myteam`.
+  See [access-control.md](skill://administrator/../../docs/access-control.md).
 
 - **Enable local-model features:** `tune --memory` and/or `--thinking`; no flag = both.
   Patches the omp-config ConfigMap; running pods pick it up on next restart.

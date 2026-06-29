@@ -187,7 +187,41 @@ CLUSTER_NAME=omp-staging ZONE=us-central1-a ./administrator.sh provision
 | `ADMIN_GCP_ACCOUNT` | active gcloud account | `provision`, `bootstrap` |
 | `OMP_REGISTRY` | `ghcr.io/james-nesbitt/collab-agent` | `bootstrap` |
 | `OMP_IMAGE_TAG` | `latest` | `bootstrap` |
+| `OMP_GROUP_DOMAIN` | `mirantis.com` | `provision`, `bootstrap`, `team-add/rm` |
 | `SUBTREE` | `services` | `vault-add` default subtree |
+
+## Teams
+
+See [docs/access-control.md](../access-control.md) for the full model. Summary:
+
+### Prerequisite (Workspace admin)
+
+Create Google Groups in Workspace:
+- `gke-security-groups@mirantis.com` — required GKE umbrella; members are other groups
+- `omp-admins@mirantis.com` — admin group; member of `gke-security-groups@`
+- `omp-team-<team>@mirantis.com` — one per team; member of `gke-security-groups@`
+
+`provision` enables `--security-group=gke-security-groups@${OMP_GROUP_DOMAIN}` on the
+cluster (GKE Groups-for-RBAC). `bootstrap` adds the `omp-admins@` ClusterRoleBinding.
+Until the Workspace groups exist, all group RBAC bindings are inert — testable via
+`kubectl auth can-i --as-group=`.
+
+### Onboard a team
+
+```bash
+./administrator.sh team-add <team>    # idempotent
+```
+
+Creates namespace `omp-team-<team>`, a `sessions` CRUD Role+RoleBinding for
+`omp-team-<team>@mirantis.com`, and grants `roles/container.clusterViewer` IAM so
+members can `get-credentials`.
+
+### List and remove teams
+
+```bash
+./administrator.sh team-ls
+./administrator.sh team-rm <team>    # prompts; warns if session namespaces exist
+```
 
 ## What you don't do
 

@@ -19,7 +19,8 @@ kubectl config current-context  # should be gke_<project>_<zone>_omp-cluster
 ```
 Or refresh: `./administrator.sh credentials`.
 
-Session CRs live in namespace `omp-system`. Session pods run in `omp-session-<name>`.
+Session CRs live in `omp-system` (admin) or `omp-team-<team>` (team sessions). Session pods
+run in `omp-session-<name>` (admin) or `omp-session-<team>-<name>` (team).
 
 ## Create a session
 
@@ -44,6 +45,25 @@ kubectl wait --for=jsonpath='{.status.phase}'=Hosting \
   session/work -n omp-system --timeout=180s
 ```
 
+
+**Team session** (requires `team-add <team>` by admin first):
+```bash
+kubectl apply -f - <<EOF
+apiVersion: omp.mirantis.io/v1alpha1
+kind: Session
+metadata:
+  name: my-session
+  namespace: omp-team-<team>     # must match spec.team
+spec:
+  subtrees: ["services"]
+  team: <team>
+EOF
+```
+The join link is NOT printed by `kubectl get sessions` (LINK column removed for security).
+Retrieve it explicitly:
+```bash
+kubectl get session my-session -n omp-team-<team> -o jsonpath='{.status.joinLink}'
+```
 ## Command map
 
 | Intent | Command |

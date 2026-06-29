@@ -25,6 +25,12 @@
 #                            mnemopi long-term memory (--memory) and/or automatic
 #                            thinking-level selection (--thinking). No flag = both.
 #                            New sessions pick it up; running pods on next restart.
+#   team-add <team>          Idempotent: create omp-team-<team> namespace, Session
+#                            CRUD Role+RoleBinding for omp-team-<team>@<domain> group,
+#                            and grant roles/container.clusterViewer IAM to the group.
+#   team-ls                  List all team namespaces and their bound groups.
+#   team-rm <team>           Prompt, then delete omp-team-<team> namespace and remove
+#                            IAM binding. Warns if session namespaces still exist.
 #   auth NAME PROVIDER [CONTAINER]
 #                            Interactive provider login INSIDE a session pod (device code
 #                            or token on stdin). Providers: anthropic gcloud aws
@@ -49,8 +55,8 @@
 #   CLUSTER_NAME       (default: omp-cluster)
 #   NODE_MACHINE_TYPE  (default: e2-standard-4)
 #   ADMIN_GCP_ACCOUNT  (default: current gcloud account)
-#   OMP_REGISTRY       (default: ghcr.io/james-nesbitt/collab-agent)
 #   OMP_IMAGE_TAG      (default: latest)
+#   OMP_GROUP_DOMAIN   (default: mirantis.com) — Google Workspace domain for RBAC groups
 #   SUBTREE            (default: services) — vault subtree
 set -euo pipefail
 
@@ -72,6 +78,7 @@ OMP_IMAGE_TAG="${OMP_IMAGE_TAG:-latest}"
 # Session image tag defaults to latest independently of the operator tag so that
 # restarted sessions always pick up the newest omp build.
 OMP_SESSION_IMAGE_TAG="${OMP_SESSION_IMAGE_TAG:-latest}"
+OMP_GROUP_DOMAIN="${OMP_GROUP_DOMAIN:-mirantis.com}"
 
 SUBTREE="${SUBTREE:-services}"
 SESSION_NS="omp-system"
@@ -94,6 +101,7 @@ render() {
     OMP_REGISTRY="${OMP_REGISTRY}" \
     OMP_IMAGE_TAG="${OMP_IMAGE_TAG}" \
     OMP_SESSION_IMAGE_TAG="${OMP_SESSION_IMAGE_TAG}" \
+    OMP_GROUP_DOMAIN="${OMP_GROUP_DOMAIN}" \
         envsubst < "${f}"
 }
 
@@ -180,7 +188,12 @@ cmd_provision() {
 
     # 2. GKE cluster
     if resource_exists "container clusters" "${CLUSTER_NAME}" --zone="${ZONE}"; then
-        warn "Cluster '${CLUSTER_NAME}' already exists — skipping."
+        warn "Cluster '${CLUSTER_NAME}' already exists — enabling Groups-for-RBAC if not set."
+        gcloud container clusters update "${CLUSTER_NAME}" \
+            --zone="${ZONE}" \
+            --project="${GCP_PROJECT}" \
+            --security-group="gke-security-groups@${OMP_GROUP_DOMAIN}" \
+            --quiet
     else
         info "Creating GKE cluster '${CLUSTER_NAME}'…"
         gcloud container clusters create "${CLUSTER_NAME}" \
@@ -194,6 +207,7 @@ cmd_provision() {
             --no-enable-basic-auth \
             --no-issue-client-certificate \
             --release-channel=regular \
+            --security-group="gke-security-groups@${OMP_GROUP_DOMAIN}" \
             --quiet
         ok "Cluster created."
     fi
@@ -244,10 +258,15 @@ cmd_provision() {
         --member="serviceAccount:${GCP_PROJECT}.svc.id.goog[omp-system/omp-operator]" \
         --quiet
 
-    # 6. Grant cluster access to admin account only; refuse if allUsers/allAuthenticatedUsers found
+    # 6. Grant cluster access: admin user (break-glass) + admin group (GKE Groups-for-RBAC)
     info "Granting container.admin to ${ADMIN_GCP_ACCOUNT}…"
     gcloud projects add-iam-policy-binding "${GCP_PROJECT}" \
         --member="user:${ADMIN_GCP_ACCOUNT}" \
+        --role="roles/container.admin" \
+        --quiet
+    info "Granting container.admin to group omp-admins@${OMP_GROUP_DOMAIN}…"
+    gcloud projects add-iam-policy-binding "${GCP_PROJECT}" \
+        --member="group:omp-admins@${OMP_GROUP_DOMAIN}" \
         --role="roles/container.admin" \
         --quiet
 
@@ -283,6 +302,12 @@ cmd_bootstrap() {
     kubectl create clusterrolebinding omp-admin \
         --clusterrole=cluster-admin \
         --user="${ADMIN_GCP_ACCOUNT}" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    # 1b. RBAC: bind omp-admins group to cluster-admin (additive — preserves user binding above)
+    info "Binding group omp-admins@${OMP_GROUP_DOMAIN} to cluster-admin…"
+    kubectl create clusterrolebinding omp-admins-group \
+        --clusterrole=cluster-admin \
+        --group="omp-admins@${OMP_GROUP_DOMAIN}" \
         --dry-run=client -o yaml | kubectl apply -f -
 
     # 2. External Secrets Operator via Helm
@@ -727,6 +752,132 @@ cmd_session_transfer() {
     echo "    kubectl get session ${session_name} -n ${SESSION_NS} -o jsonpath='{.status.joinLink}'"
 }
 
+# ---------------------------------------------------------------------------
+# Team management subcommands
+# ---------------------------------------------------------------------------
+
+# valid_team <slug> — return 0 if team slug is a DNS-label-safe identifier.
+valid_team() { [[ "$1" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; }
+
+cmd_team_add() {
+    local team="${1:-}"
+    [[ -n "${team}" ]] || die "Usage: ./administrator.sh team-add <team>"
+    valid_team "${team}" || die "Invalid team slug '${team}': must match ^[a-z0-9]([-a-z0-9]*[a-z0-9])?\$"
+    require_cluster
+    local ns="omp-team-${team}"
+    local group="omp-team-${team}@${OMP_GROUP_DOMAIN}"
+
+    info "Creating team namespace + RBAC for '${team}' (group: ${group})…"
+    kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${ns}
+  labels:
+    omp.mirantis.io/team: "${team}"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: omp-team-sessions
+  namespace: ${ns}
+rules:
+  - apiGroups: ["omp.mirantis.io"]
+    resources: ["sessions", "sessions/status"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: omp-team-sessions
+  namespace: ${ns}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: omp-team-sessions
+subjects:
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: ${group}
+EOF
+
+    info "Granting roles/container.clusterViewer to group ${group}…"
+    gcloud projects add-iam-policy-binding "${GCP_PROJECT}" \
+        --member="group:${group}" \
+        --role="roles/container.clusterViewer" \
+        --quiet
+
+    echo ""
+    echo "TEAM_ADD_OK: ${team}"
+    echo "  Namespace   : ${ns}"
+    echo "  Group       : ${group}"
+    echo ""
+    echo "  Manual steps (Workspace admin required):"
+    echo "    1. Create group ${group} in Google Workspace (admin.google.com)"
+    echo "    2. Nest ${group} inside gke-security-groups@${OMP_GROUP_DOMAIN}"
+    echo "    3. Add team members to ${group}"
+    echo ""
+    echo "  Members create sessions with:"
+    echo "    spec.team: ${team}    (CR must be in namespace ${ns})"
+    echo "  Session pod namespace: omp-session-${team}-<name>"
+}
+
+cmd_team_ls() {
+    require_cluster
+    info "Team namespaces:"
+    kubectl get namespaces \
+        -l omp.mirantis.io/team \
+        -o custom-columns="TEAM:.metadata.labels.omp\.mirantis\.io/team,NAMESPACE:.metadata.name"
+    echo ""
+    info "Team RBAC subjects (one binding per team):"
+    for ns in $(kubectl get namespaces -l omp.mirantis.io/team -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+        local subj
+        subj=$(kubectl get rolebinding omp-team-sessions -n "${ns}" \
+               -o jsonpath='{.subjects[0].name}' 2>/dev/null || echo "(no binding)")
+        echo "  ${ns}: ${subj}"
+    done
+}
+
+cmd_team_rm() {
+    local team="${1:-}"
+    [[ -n "${team}" ]] || die "Usage: ./administrator.sh team-rm <team>"
+    valid_team "${team}" || die "Invalid team slug: ${team}"
+    require_cluster
+    local ns="omp-team-${team}"
+    local group="omp-team-${team}@${OMP_GROUP_DOMAIN}"
+
+    # Warn if session namespaces still exist for this team
+    local live_sessions
+    live_sessions=$(kubectl get namespaces \
+        -o jsonpath='{.items[*].metadata.name}' 2>/dev/null \
+        | tr ' ' '\n' | grep "^omp-session-${team}-" || true)
+    if [[ -n "${live_sessions}" ]]; then
+        warn "The following session namespaces still exist for team '${team}':"
+        echo "${live_sessions}" | sed 's/^/    /'
+        warn "Delete the team's Sessions first, then re-run team-rm."
+    fi
+
+    echo ""
+    echo "WARNING: This will delete namespace '${ns}' and remove IAM binding for group ${group}."
+    read -r -p "Type 'yes' to confirm: " confirm
+    [[ "${confirm}" == "yes" ]] || { info "Aborted."; exit 0; }
+
+    if kubectl get namespace "${ns}" >/dev/null 2>&1; then
+        info "Deleting namespace ${ns} (cascades Role + RoleBinding)…"
+        kubectl delete namespace "${ns}"
+    else
+        info "Namespace ${ns} not found — skipping."
+    fi
+
+    info "Removing roles/container.clusterViewer IAM binding for group ${group}…"
+    gcloud projects remove-iam-policy-binding "${GCP_PROJECT}" \
+        --member="group:${group}" \
+        --role="roles/container.clusterViewer" \
+        --quiet || warn "IAM binding removal failed (may not exist)"
+
+    ok "TEAM_RM_OK: ${team}"
+}
+
 cmd_help() {
     sed -n '2,/^set -/p' "$0" | grep '^#' | sed 's/^# \?//'
 }
@@ -750,6 +901,9 @@ case "${SUBCOMMAND}" in
     auth)           cmd_auth "$@" ;;
     port-forward)    cmd_port_forward "$@" ;;
     session-transfer) cmd_session_transfer "$@" ;;
+    team-add)        cmd_team_add "$@" ;;
+    team-ls)         cmd_team_ls "$@" ;;
+    team-rm)         cmd_team_rm "$@" ;;
     help|--help|-h)  cmd_help ;;
     *)
         echo "Unknown subcommand: ${SUBCOMMAND}" >&2
