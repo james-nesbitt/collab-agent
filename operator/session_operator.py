@@ -341,19 +341,12 @@ def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_s
                     image_pull_policy="Always",
                     env=env,
                     env_from=[
+                        # omp-creds: ESO-synced credentials from the declared spec.subtrees.
+                        # This is the only auto-injected secret; all others must be
+                        # explicitly added to spec.subtrees or spec.env.
                         k8s.V1EnvFromSource(
                             secret_ref=k8s.V1SecretEnvSource(
                                 name="omp-creds", optional=True
-                            )
-                        ),
-                        k8s.V1EnvFromSource(
-                            secret_ref=k8s.V1SecretEnvSource(
-                                name="omp-bootstrap-env", optional=True
-                            )
-                        ),
-                        k8s.V1EnvFromSource(
-                            secret_ref=k8s.V1SecretEnvSource(
-                                name="anthropic-oauth", optional=True
                             )
                         ),
                     ],
@@ -664,13 +657,13 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
     # 2. ServiceAccount
     _create_or_skip(v1.create_namespaced_service_account, ns, _service_account(ns))
 
-    # 2b. Copy secrets from omp-system that are present (gracefully absent if not yet created)
+    # 2b. Copy ghcr-pull-secret from omp-system so pods can pull from GHCR.
+    # No other secrets are auto-injected — sessions receive only what their
+    # spec.subtrees declare via ESO. User-specific credentials (gh, atlassian,
+    # anthropic) must be explicitly requested per session.
     has_pull_secret = _copy_secret(v1, ns, "ghcr-pull-secret")
     if has_pull_secret:
         logger.info("Copied ghcr-pull-secret into %s", ns)
-    for secret_name in ("omp-bootstrap-env", "anthropic-oauth"):
-        if _copy_secret(v1, ns, secret_name):
-            logger.info("Copied %s into %s", secret_name, ns)
 
     # 3. PVC
     _create_or_skip(v1.create_namespaced_persistent_volume_claim, ns, _pvc(ns))

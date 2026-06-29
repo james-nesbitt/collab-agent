@@ -15,10 +15,10 @@
 #   setup                    Configure the ESO ClusterSecretStore, create/update the
 #                            master omp-config ConfigMap in omp-system (secrets.enabled,
 #                            modelRoles, portable tuning), and print SETUP_OK.
-#   vault-add ENTRY          Insert a credential into GCP Secret Manager (value read
-#                            from stdin, never echoed). Entry format: subtree/key/...
-#                            e.g.  printf '%s' "$TOK" | ./administrator.sh vault-add \
-#                            services/github/token
+#   vault-add ENTRY          Insert a credential into GCP Secret Manager (prompted
+#                            interactively, never echoed). Entry format: subtree/key
+#                            Shared platform creds: services/github-token
+#                            User-specific creds:   users/<name>/atlassian-token
 #   vault-ls [SUBTREE]       List vault entry NAMES only (no values).
 #   tune [--memory] [--thinking]
 #                            Patch the master omp-config ConfigMap with opt-in tuning:
@@ -31,9 +31,9 @@
 #   team-ls                  List all team namespaces and their bound groups.
 #   team-rm <team>           Prompt, then delete omp-team-<team> namespace and remove
 #                            IAM binding. Warns if session namespaces still exist.
-#   pull-secret              Update the GHCR image pull secret from a GitHub PAT on stdin.
-#                            Requires read:packages scope. Propagates to all session namespaces.
-#                            printf '%s' "$PAT" | ./administrator.sh pull-secret
+#   pull-secret              Update the GHCR image pull secret (prompted interactively).
+#                            Requires a GitHub PAT with read:packages scope.
+#                            Propagates to all running session namespaces.
 #   auth NAME PROVIDER [CONTAINER]
 #                            Interactive provider login INSIDE a session pod (device code
 #                            or token on stdin). Providers: anthropic gcloud aws
@@ -60,6 +60,7 @@
 #   ADMIN_GCP_ACCOUNT  (default: current gcloud account)
 #   OMP_IMAGE_TAG      (default: latest)
 #   OMP_GROUP_DOMAIN   (default: mirantis.com) — Google Workspace domain for RBAC groups
+#   GHCR_USERNAME      (default: james-nesbitt) — GitHub username for GHCR pull secret
 #   SUBTREE            (default: services) — vault subtree
 set -euo pipefail
 
@@ -82,6 +83,7 @@ OMP_IMAGE_TAG="${OMP_IMAGE_TAG:-latest}"
 # restarted sessions always pick up the newest omp build.
 OMP_SESSION_IMAGE_TAG="${OMP_SESSION_IMAGE_TAG:-latest}"
 OMP_GROUP_DOMAIN="${OMP_GROUP_DOMAIN:-mirantis.com}"
+GHCR_USERNAME="${GHCR_USERNAME:-james-nesbitt}"
 
 SUBTREE="${SUBTREE:-services}"
 SESSION_NS="omp-system"
@@ -510,7 +512,7 @@ providers:
 
 cmd_vault_add() {
     local entry="${1:-}"
-    [[ -n "${entry}" ]] || die "Usage: ./administrator.sh vault-add ENTRY   (value on stdin)"
+    [[ -n "${entry}" ]] || die "Usage: ./administrator.sh vault-add ENTRY"
     valid_token "${entry}" || die "Invalid entry name: ${entry}"
 
     # Derive GSM secret id and subtree label from the entry path.
@@ -518,10 +520,15 @@ cmd_vault_add() {
     local gsm_id; gsm_id=$(printf '%s' "${entry}" | tr '/' '-')
     local sublabel; sublabel=$(printf '%s' "${subtree}" | tr '/' '-')
 
-    # Read value from stdin; never echo it.
+    # Read value: interactively (hidden) when on a terminal, from pipe when not.
     local value
-    value=$(cat)
-    [[ -n "${value}" ]] || die "Empty value on stdin for entry: ${entry}"
+    if [[ -t 0 ]]; then
+        read -rs -p "[admin] Value for '${entry}' (hidden): " value
+        echo ""  >&2
+    else
+        value=$(cat)
+    fi
+    [[ -n "${value}" ]] || die "Empty value for entry: ${entry}"
 
     # Create the GSM secret if it doesn't exist yet.
     if ! gcloud secrets describe "${gsm_id}" --project="${GCP_PROJECT}" >/dev/null 2>&1; then
@@ -628,10 +635,13 @@ cmd_auth() {
                 'az login --use-device-code'
             ;;
         gh)
-            # Token piped on stdin; never appears in argv
-            info "Authenticating GitHub CLI in session '${name}' (token on stdin)…"
-            info "Paste your GitHub PAT and press Ctrl-D:"
-            kubectl exec -i -n "${ns}" -c "${container}" omp -- bash -lc \
+            # Read token interactively (hidden) then pipe into the pod — never appears in argv or history
+            local gh_token
+            read -rs -p "[admin] GitHub PAT (hidden): " gh_token
+            echo "" >&2
+            [[ -n "${gh_token}" ]] || die "No token entered"
+            info "Authenticating GitHub CLI in session '${name}'…"
+            printf '%s' "${gh_token}" | kubectl exec -i -n "${ns}" -c "${container}" omp -- bash -lc \
                 'gh auth login --with-token'
             ;;
         *)
@@ -895,20 +905,25 @@ cmd_team_rm() {
 }
 
 cmd_pull_secret() {
-    # pull-secret — update the GHCR image pull secret from a PAT on stdin.
-    # The PAT needs read:packages (and repo for private packages).
+    # pull-secret — update the GHCR image pull secret.
+    # Prompts for a GitHub PAT (hidden, not echoed). Needs read:packages scope.
     # Updates omp-system and propagates to all running session namespaces.
     require_cluster
 
     local token
-    token=$(cat)
-    [[ -n "${token}" ]] || die "No token on stdin. Usage: printf '%s' \"\$PAT\" | ./administrator.sh pull-secret"
+    if [[ -t 0 ]]; then
+        read -rs -p "[admin] GitHub PAT for GHCR (hidden): " token
+        echo "" >&2
+    else
+        token=$(cat)
+    fi
+    [[ -n "${token}" ]] || die "No token provided"
 
-    info "Updating ghcr-pull-secret in omp-system…"
+    info "Updating ghcr-pull-secret in omp-system (user: ${GHCR_USERNAME})…"
     kubectl create secret docker-registry ghcr-pull-secret \
         -n omp-system \
         --docker-server=ghcr.io \
-        --docker-username="${ADMIN_GCP_ACCOUNT%%@*}" \
+        --docker-username="${GHCR_USERNAME}" \
         --docker-password="${token}" \
         --dry-run=client -o yaml | kubectl apply -f -
 
@@ -920,7 +935,7 @@ cmd_pull_secret() {
         kubectl create secret docker-registry ghcr-pull-secret \
             -n "${ns}" \
             --docker-server=ghcr.io \
-            --docker-username="${ADMIN_GCP_ACCOUNT%%@*}" \
+            --docker-username="${GHCR_USERNAME}" \
             --docker-password="${token}" \
             --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1 && updated=$((updated + 1))
     done
