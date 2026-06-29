@@ -31,6 +31,9 @@
 #   team-ls                  List all team namespaces and their bound groups.
 #   team-rm <team>           Prompt, then delete omp-team-<team> namespace and remove
 #                            IAM binding. Warns if session namespaces still exist.
+#   pull-secret              Update the GHCR image pull secret from a GitHub PAT on stdin.
+#                            Requires read:packages scope. Propagates to all session namespaces.
+#                            printf '%s' "$PAT" | ./administrator.sh pull-secret
 #   auth NAME PROVIDER [CONTAINER]
 #                            Interactive provider login INSIDE a session pod (device code
 #                            or token on stdin). Providers: anthropic gcloud aws
@@ -891,6 +894,40 @@ cmd_team_rm() {
     ok "TEAM_RM_OK: ${team}"
 }
 
+cmd_pull_secret() {
+    # pull-secret — update the GHCR image pull secret from a PAT on stdin.
+    # The PAT needs read:packages (and repo for private packages).
+    # Updates omp-system and propagates to all running session namespaces.
+    require_cluster
+
+    local token
+    token=$(cat)
+    [[ -n "${token}" ]] || die "No token on stdin. Usage: printf '%s' \"\$PAT\" | ./administrator.sh pull-secret"
+
+    info "Updating ghcr-pull-secret in omp-system…"
+    kubectl create secret docker-registry ghcr-pull-secret \
+        -n omp-system \
+        --docker-server=ghcr.io \
+        --docker-username="${ADMIN_GCP_ACCOUNT%%@*}" \
+        --docker-password="${token}" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+    # Propagate to all running session namespaces (omp-session-*)
+    info "Propagating to session namespaces…"
+    local updated=0
+    for ns in $(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}' \
+                | tr ' ' '\n' | grep '^omp-session-'); do
+        kubectl create secret docker-registry ghcr-pull-secret \
+            -n "${ns}" \
+            --docker-server=ghcr.io \
+            --docker-username="${ADMIN_GCP_ACCOUNT%%@*}" \
+            --docker-password="${token}" \
+            --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1 && updated=$((updated + 1))
+    done
+    ok "PULL_SECRET_OK — updated omp-system + ${updated} session namespace(s)"
+    info "Pods in ImagePullBackOff will recover automatically within ~30s."
+}
+
 cmd_help() {
     sed -n '2,/^set -/p' "$0" | grep '^#' | sed 's/^# \?//'
 }
@@ -911,12 +948,13 @@ case "${SUBCOMMAND}" in
     tune)           cmd_tune "$@" ;;
     vault-add)      cmd_vault_add "$@" ;;
     vault-ls)       cmd_vault_ls "$@" ;;
-    auth)           cmd_auth "$@" ;;
-    port-forward)    cmd_port_forward "$@" ;;
+    pull-secret)      cmd_pull_secret "$@" ;;
+    auth)             cmd_auth "$@" ;;
+    port-forward)     cmd_port_forward "$@" ;;
     session-transfer) cmd_session_transfer "$@" ;;
-    team-add)        cmd_team_add "$@" ;;
-    team-ls)         cmd_team_ls "$@" ;;
-    team-rm)         cmd_team_rm "$@" ;;
+    team-add)         cmd_team_add "$@" ;;
+    team-ls)          cmd_team_ls "$@" ;;
+    team-rm)          cmd_team_rm "$@" ;;
     help|--help|-h)  cmd_help ;;
     *)
         echo "Unknown subcommand: ${SUBCOMMAND}" >&2
