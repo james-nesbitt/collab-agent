@@ -166,6 +166,28 @@ curl -fsS -u "${!AE_VAR}:${!AT_VAR}" \
 
 ## Confluence (Cloud REST API)
 
+### Default space
+
+**Always use `PRODENG` as the default Confluence space** unless the user explicitly specifies otherwise.
+- PRODENG space key: `PRODENG`
+- PRODENG homepage ID: `1901003000`
+- PRODENG space URL: `https://mirantis.jira.com/wiki/spaces/PRODENG`
+
+When creating a page without an explicit parent, use the PRODENG homepage as the ancestor:
+```json
+{"ancestors": [{"id": "1901003000"}]}
+```
+
+### Known behaviours and constraints
+
+- **For POST/PUT with a body**, always write the payload to a temp file and pass `--data-binary @/tmp/file.json`. Inline `-d '{...}'` with complex JSON is unreliable.
+- **`text~` CQL search does not work** on this instance — use title-based or direct ID lookups instead.
+- **Cannot move pages between spaces** without space admin rights — create in the correct space from the start.
+- **Cannot delete pages** without space admin rights — if a page lands in the wrong place, update its title to `[DELETE] ...`, set the body to a redirect note pointing at the correct page, and ask the user to manually trash it.
+- **Page creation response may return `space: null`** even on success — confirm by fetching the page by ID.
+- **Version number for updates must be `current + 1`** — always fetch the current version before a PUT.
+- **Special Unicode characters in titles** (em dashes, emoji) can cause 400 errors — use ASCII hyphens in page titles.
+
 ```bash
 BASE=https://mirantis.jira.com/wiki
 
@@ -173,23 +195,40 @@ BASE=https://mirantis.jira.com/wiki
 curl -fsS -u "${!AE_VAR}:${!AT_VAR}" -H "Accept: application/json" \
   "$BASE/rest/api/content/12345?expand=body.storage,version"
 
-# Search pages with CQL
+# Get space homepage ID
 curl -fsS -u "${!AE_VAR}:${!AT_VAR}" -H "Accept: application/json" \
-  "$BASE/rest/api/content/search?cql=space=ENG+AND+title~%22deploy%22"
+  "$BASE/rest/api/space/PRODENG?expand=homepage"
 
-# Create a page
+# List pages in a space
+curl -fsS -u "${!AE_VAR}:${!AT_VAR}" -H "Accept: application/json" \
+  "$BASE/rest/api/content?spaceKey=PRODENG&type=page&limit=25"
+
+# Create a page (write payload to file — do NOT use inline -d for complex JSON)
+cat > /tmp/page.json << 'EOF'
+{
+  "type": "page",
+  "title": "New Page",
+  "space": {"key": "PRODENG"},
+  "ancestors": [{"id": "1901003000"}],
+  "body": {"storage": {"value": "<p>Content here</p>", "representation": "storage"}}
+}
+EOF
 curl -fsS -u "${!AE_VAR}:${!AT_VAR}" \
-  -H "Content-Type: application/json" \
-  -X POST "$BASE/rest/api/content" \
-  -d '{"type":"page","title":"New Page","space":{"key":"ENG"},
-       "body":{"storage":{"value":"<p>Content here</p>","representation":"storage"}}}'
+  -H "Content-Type: application/json" -H "Accept: application/json" \
+  -X POST "$BASE/rest/api/content" --data-binary @/tmp/page.json
 
 # Update a page (version.number must be current+1)
+cat > /tmp/update.json << 'EOF'
+{
+  "type": "page",
+  "title": "Updated Title",
+  "version": {"number": 3},
+  "body": {"storage": {"value": "<p>Updated content</p>", "representation": "storage"}}
+}
+EOF
 curl -fsS -u "${!AE_VAR}:${!AT_VAR}" \
-  -H "Content-Type: application/json" \
-  -X PUT "$BASE/rest/api/content/12345" \
-  -d '{"type":"page","title":"Updated Title","version":{"number":3},
-       "body":{"storage":{"value":"<p>Updated content</p>","representation":"storage"}}}'
+  -H "Content-Type: application/json" -H "Accept: application/json" \
+  -X PUT "$BASE/rest/api/content/12345" --data-binary @/tmp/update.json
 ```
 
 ---
