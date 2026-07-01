@@ -40,6 +40,9 @@
 #   github-pull-secret       Update the GHCR image pull secret using the gh CLI.
 #                            Auto-detects GitHub username and token via 'gh auth'.
 #                            Requires: gh auth login with read:packages scope.
+#   github-user-cred [<name>] Create/update a personal GitHub token K8s Secret in
+#                            omp-user-<name> from the gh CLI (GITHUB_TOKEN env var).
+#                            Name defaults to current gcloud account username.
 #   auth NAME PROVIDER [CONTAINER]
 #                            Interactive provider login INSIDE a session pod (device code
 #                            or token on stdin). Providers: anthropic gcloud aws
@@ -1034,6 +1037,40 @@ cmd_team_rm() {
     ok "TEAM_RM_OK: ${team}"
 }
 
+cmd_github_user_cred() {
+    # github-user-cred [<username>] — create/update a personal GitHub token K8s Secret
+    # in omp-user-<name> from the gh CLI. Injects as GITHUB_TOKEN in session pods.
+    # Requires: gh auth login (any scope that returns a token).
+    require_cluster
+    command -v gh >/dev/null || die "'gh' CLI not found — install from https://cli.github.com"
+
+    gh auth status >/dev/null 2>&1 || die "gh CLI not authenticated — run: gh auth login"
+
+    # Username: explicit arg, else derived from current gcloud account slug.
+    local username="${1:-${ADMIN_GCP_ACCOUNT%%@*}}"
+    local ns="omp-user-${username}"
+
+    kubectl get namespace "${ns}" >/dev/null 2>&1 \
+        || die "Namespace ${ns} does not exist — run: ./administrator.sh user-add ${username}"
+
+    local token
+    token=$(gh auth token 2>/dev/null) \
+        || die "Could not retrieve token from gh CLI — re-run: gh auth login"
+    [[ -n "${token}" ]] || die "gh auth token returned empty"
+
+    info "Creating/updating 'github-token' secret in ${ns}…"
+    kubectl create secret generic github-token \
+        -n "${ns}" \
+        --from-literal=GITHUB_TOKEN="${token}" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+    ok "GITHUB_USER_CRED_OK — ${ns}/github-token"
+    info "Reference in Session CR:"
+    info "  spec:"
+    info "    credentialSecrets:"
+    info "      - ${username}/github-token"
+}
+
 cmd_github_pull_secret() {
     # github-pull-secret — update the GHCR image pull secret using the gh CLI.
     # Requires: gh auth login with read:packages scope.
@@ -1105,8 +1142,8 @@ case "${SUBCOMMAND}" in
     tune)           cmd_tune "$@" ;;
     vault-add)      cmd_vault_add "$@" ;;
     vault-ls)       cmd_vault_ls "$@" ;;
-    github-pull-secret) cmd_github_pull_secret "$@" ;;
-    port-forward)     cmd_port_forward "$@" ;;
+    github-pull-secret)  cmd_github_pull_secret "$@" ;;
+    github-user-cred)    cmd_github_user_cred "$@" ;;
     session-transfer) cmd_session_transfer "$@" ;;
     user-add)         cmd_user_add "$@" ;;
     user-rm)          cmd_user_rm "$@" ;;
