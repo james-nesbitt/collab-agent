@@ -757,8 +757,15 @@ cmd_session_transfer() {
     filename=$(basename "${jsonl}" .jsonl)
     local session_id="${filename#*_}"
 
-    # Pod-side paths.
-    local ns="omp-session-${session_name}"
+    # Derive pod namespace and CR namespace from session status.
+    local ns cr_ns
+    for cr_ns in $(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}' \
+                   | tr ' ' '\n' | grep -E '^omp-system$|^omp-team-'); do
+        ns=$(kubectl get session "${session_name}" -n "${cr_ns}" \
+             -o jsonpath='{.status.namespace}' 2>/dev/null || true)
+        [[ -n "${ns}" ]] && break
+    done
+    [[ -n "${ns}" ]] || die "Session '${session_name}' not found or has no status.namespace yet"
     local pod_home="/home/omp"
     local pod_agent="${pod_home}/.omp/agent"
     local pod_encoded="-${session_name}"          # pod cwd is always ~/SESSION_NAME
@@ -778,19 +785,18 @@ cmd_session_transfer() {
     ok "Session file copied."
 
     # If encodings differ, inject RESUME_SESSION_ID so the entrypoint uses --resume=<id>.
-    # (When encodings match, -c will find the session automatically; no env patch needed.)
     if [[ "${local_encoded}" != "${pod_encoded}" ]]; then
         info "Encodings differ — setting RESUME_SESSION_ID in spec.env…"
-        kubectl patch session "${session_name}" -n "${SESSION_NS}" \
+        kubectl patch session "${session_name}" -n "${cr_ns}" \
             --type=merge -p "{\"spec\":{\"env\":{\"RESUME_SESSION_ID\":\"${session_id}\"}}}"
         ok "RESUME_SESSION_ID set."
         info "After the session resumes, clear it with:"
-        info "  kubectl patch session ${session_name} -n ${SESSION_NS} --type=merge -p '{\"spec\":{\"env\":{\"RESUME_SESSION_ID\":null}}}'"
+        info "  kubectl patch session ${session_name} -n ${cr_ns} --type=merge -p '{\"spec\":{\"env\":{\"RESUME_SESSION_ID\":null}}}'"
     fi
 
     # Restart the pod so omp picks up the transferred session.
     info "Restarting pod to resume transferred session…"
-    kubectl patch session "${session_name}" -n "${SESSION_NS}" \
+    kubectl patch session "${session_name}" -n "${cr_ns}" \
         --type=merge -p "{\"spec\":{\"image\":null},\"metadata\":{\"annotations\":{\"omp.mirantis.io/restartedAt\":\"$(date +%s)\"}}}"
 
     echo ""
@@ -799,7 +805,7 @@ cmd_session_transfer() {
     echo "  Pod     : ${ns}"
     echo ""
     echo "  Wait for Hosting, then get the collab link:"
-    echo "    kubectl get session ${session_name} -n ${SESSION_NS} -o jsonpath='{.status.joinLink}'"
+    echo "    kubectl get session ${session_name} -n ${cr_ns} -o jsonpath='{.status.joinLink}'"
 }
 
 # ---------------------------------------------------------------------------
@@ -1144,6 +1150,8 @@ case "${SUBCOMMAND}" in
     vault-ls)       cmd_vault_ls "$@" ;;
     github-pull-secret)  cmd_github_pull_secret "$@" ;;
     github-user-cred)    cmd_github_user_cred "$@" ;;
+    auth)             cmd_auth "$@" ;;
+    port-forward)     cmd_port_forward "$@" ;;
     session-transfer) cmd_session_transfer "$@" ;;
     user-add)         cmd_user_add "$@" ;;
     user-rm)          cmd_user_rm "$@" ;;
