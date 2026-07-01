@@ -31,22 +31,24 @@
 #                            credential K8s Secrets and reference them in sessions via
 #                            spec.credentialSecrets: ["<name>/<secret>"].
 #   user-rm <name>           Prompt, then delete omp-user-<name> and remove IAM.
+#   user-cred-add <secret> <KEY> [<KEY2> ...] [--user <name>]
+#                            Create/update a personal K8s Secret in omp-user-<name>
+#                            with one or more env var keys (values prompted hidden).
+#                            e.g. user-cred-add atlassian ATLASSIAN_TOKEN ATLASSIAN_EMAIL
+#   user-cred-ls [--user <name>]
+#                            List credential secrets and their key names in omp-user-<name>.
 #   team-add <team>          Idempotent: create omp-team-<team> namespace, Session
 #                            CRUD Role+RoleBinding for omp-team-<team>@<domain> group,
 #                            and grant roles/container.clusterViewer IAM to the group.
 #   team-ls                  List all team namespaces and their bound groups.
 #   team-rm <team>           Prompt, then delete omp-team-<team> namespace and remove
 #                            IAM binding. Warns if session namespaces still exist.
-#   github-pull-secret       Update the GHCR image pull secret using the gh CLI.
-#                            Auto-detects GitHub username and token via 'gh auth'.
-#                            Requires: gh auth login with read:packages scope.
-#   github-user-cred [<name>] Create/update a personal GitHub token K8s Secret in
-#                            omp-user-<name> from the gh CLI (GITHUB_TOKEN env var).
-#                            Name defaults to current gcloud account username.
 #   auth NAME PROVIDER [CONTAINER]
 #                            Interactive provider login INSIDE a session pod (device code
 #                            or token on stdin). Providers: anthropic gcloud aws
 #                            aws-configure az gh. Credentials persist on the session PVC.
+#                            For AWS SSO: run aws-configure once, then auth periodically.
+#                            Set AWS_PROFILE via spec.env in the Session CR for auto-select.
 #   port-forward NAME LOCAL_PORT [REMOTE_PORT]
 #                            Forward a session pod port to localhost (for browser-redirect
 #                            OAuth, e.g. aws configure sso).
@@ -1043,6 +1045,78 @@ cmd_team_rm() {
     ok "TEAM_RM_OK: ${team}"
 }
 
+cmd_user_cred_add() {
+    # user-cred-add <secret-name> <ENV_VAR> [<ENV_VAR2> ...] [--user <name>]
+    # Create/update a K8s Secret in omp-user-<name> with one or more env var keys.
+    # Each env var key is prompted for separately (hidden input, never echoed).
+    # Default user: current gcloud account slug.
+    # Example:
+    #   ./administrator.sh user-cred-add atlassian ATLASSIAN_TOKEN ATLASSIAN_EMAIL
+    require_cluster
+
+    # Parse --user flag and positional args.
+    local username="${ADMIN_GCP_ACCOUNT%%@*}"
+    local secret_name="" keys=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --user) username="${2:-}"; shift 2 ;;
+            *)
+                if [[ -z "${secret_name}" ]]; then secret_name="$1"
+                else keys+=("$1")
+                fi
+                shift ;;
+        esac
+    done
+    [[ -n "${secret_name}" ]] || die "Usage: ./administrator.sh user-cred-add <secret-name> <ENV_VAR> [<ENV_VAR2> ...] [--user <name>]"
+    [[ ${#keys[@]} -gt 0 ]] || die "Provide at least one ENV_VAR key name"
+
+    local ns="omp-user-${username}"
+    kubectl get namespace "${ns}" >/dev/null 2>&1 \
+        || die "Namespace ${ns} does not exist — run: ./administrator.sh user-add ${username}"
+
+    # Collect values interactively (hidden).
+    local -a literal_args=()
+    for key in "${keys[@]}"; do
+        local val
+        read -rs -p "[admin] Value for ${key} (hidden): " val
+        echo "" >&2
+        [[ -n "${val}" ]] || die "Empty value for ${key}"
+        literal_args+=("--from-literal=${key}=${val}")
+    done
+
+    info "Creating/updating secret '${secret_name}' in ${ns} (keys: ${keys[*]})…"
+    kubectl create secret generic "${secret_name}" \
+        -n "${ns}" \
+        "${literal_args[@]}" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+    ok "USER_CRED_ADD_OK — ${ns}/${secret_name}"
+    info "Reference in Session CR:  credentialSecrets: [\"${username}/${secret_name}\"]"
+}
+
+cmd_user_cred_ls() {
+    # user-cred-ls [--user <name>] — list credential secrets in omp-user-<name>.
+    # Shows secret names and their keys (never values).
+    require_cluster
+    local username="${1:-${ADMIN_GCP_ACCOUNT%%@*}}"
+    [[ "$1" == "--user" ]] && username="${2:-}" && shift 2 || true
+    local ns="omp-user-${username}"
+    info "Credential secrets in ${ns}:"
+    kubectl get secrets -n "${ns}" --field-selector type=Opaque \
+        -o custom-columns="NAME:.metadata.name,KEYS:.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration" \
+        2>/dev/null || echo "  (none or namespace not found)"
+    echo ""
+    # Show key names per secret (not values)
+    for secret in $(kubectl get secrets -n "${ns}" --field-selector type=Opaque \
+                    -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+        local keys
+        keys=$(kubectl get secret "${secret}" -n "${ns}" \
+               -o jsonpath='{.data}' 2>/dev/null \
+               | python3 -c "import sys,json; print(', '.join(json.load(sys.stdin).keys()))" 2>/dev/null)
+        echo "  ${secret}: ${keys}"
+    done
+}
+
 cmd_github_user_cred() {
     # github-user-cred [<username>] — create/update a personal GitHub token K8s Secret
     # in omp-user-<name> from the gh CLI. Injects as GITHUB_TOKEN in session pods.
@@ -1147,14 +1221,10 @@ case "${SUBCOMMAND}" in
     setup)          cmd_setup "$@" ;;
     tune)           cmd_tune "$@" ;;
     vault-add)      cmd_vault_add "$@" ;;
-    vault-ls)       cmd_vault_ls "$@" ;;
-    github-pull-secret)  cmd_github_pull_secret "$@" ;;
-    github-user-cred)    cmd_github_user_cred "$@" ;;
-    auth)             cmd_auth "$@" ;;
-    port-forward)     cmd_port_forward "$@" ;;
-    session-transfer) cmd_session_transfer "$@" ;;
     user-add)         cmd_user_add "$@" ;;
     user-rm)          cmd_user_rm "$@" ;;
+    user-cred-add)    cmd_user_cred_add "$@" ;;
+    user-cred-ls)     cmd_user_cred_ls "$@" ;;
     team-add)         cmd_team_add "$@" ;;
     team-ls)          cmd_team_ls "$@" ;;
     team-rm)          cmd_team_rm "$@" ;;
