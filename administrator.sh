@@ -37,9 +37,9 @@
 #   team-ls                  List all team namespaces and their bound groups.
 #   team-rm <team>           Prompt, then delete omp-team-<team> namespace and remove
 #                            IAM binding. Warns if session namespaces still exist.
-#   pull-secret              Update the GHCR image pull secret (prompted interactively).
-#                            Requires a GitHub PAT with read:packages scope.
-#                            Propagates to all running session namespaces.
+#   github-pull-secret       Update the GHCR image pull secret using the gh CLI.
+#                            Auto-detects GitHub username and token via 'gh auth'.
+#                            Requires: gh auth login with read:packages scope.
 #   auth NAME PROVIDER [CONTAINER]
 #                            Interactive provider login INSIDE a session pod (device code
 #                            or token on stdin). Providers: anthropic gcloud aws
@@ -66,7 +66,6 @@
 #   ADMIN_GCP_ACCOUNT  (default: current gcloud account)
 #   OMP_IMAGE_TAG      (default: latest)
 #   OMP_GROUP_DOMAIN   (default: mirantis.com) — Google Workspace domain for RBAC groups
-#   GHCR_USERNAME      (default: james-nesbitt) — GitHub username for GHCR pull secret
 #   SUBTREE            (default: services) — vault subtree
 set -euo pipefail
 
@@ -89,7 +88,6 @@ OMP_IMAGE_TAG="${OMP_IMAGE_TAG:-latest}"
 # restarted sessions always pick up the newest omp build.
 OMP_SESSION_IMAGE_TAG="${OMP_SESSION_IMAGE_TAG:-latest}"
 OMP_GROUP_DOMAIN="${OMP_GROUP_DOMAIN:-mirantis.com}"
-GHCR_USERNAME="${GHCR_USERNAME:-james-nesbitt}"
 
 SUBTREE="${SUBTREE:-services}"
 SESSION_NS="omp-system"
@@ -1036,23 +1034,34 @@ cmd_team_rm() {
     ok "TEAM_RM_OK: ${team}"
 }
 
-cmd_pull_secret() {
-    # pull-secret — update the GHCR image pull secret.
-    # Prompts for GitHub username and PAT (PAT hidden, not echoed).
-    # PAT needs read:packages scope.
-    # Updates omp-system and propagates to all running session namespaces.
+cmd_github_pull_secret() {
+    # github-pull-secret — update the GHCR image pull secret using the gh CLI.
+    # Requires: gh auth login with read:packages scope.
+    # Run 'gh auth refresh --scopes read:packages' if packages scope is missing.
     require_cluster
+    command -v gh >/dev/null || die "'gh' CLI not found — install from https://cli.github.com"
 
+    info "Checking gh CLI authentication…"
+    gh auth status >/dev/null 2>&1 || die "gh CLI not authenticated — run: gh auth login"
+
+    # Derive username and token from gh CLI — no manual input needed.
     local username token
-    read -r -p "[admin] GitHub username [${GHCR_USERNAME}]: " username
-    username="${username:-${GHCR_USERNAME}}"
-    [[ -n "${username}" ]] || die "No GitHub username provided"
+    username=$(gh api user --jq .login 2>/dev/null) \
+        || die "Could not retrieve GitHub username from gh CLI"
+    token=$(gh auth token 2>/dev/null) \
+        || die "Could not retrieve token from gh CLI"
+    [[ -n "${username}" ]] || die "gh API returned empty username"
+    [[ -n "${token}" ]]    || die "gh auth token returned empty — re-run: gh auth login"
 
-    read -rs -p "[admin] GitHub PAT for '${username}' (hidden): " token
-    echo "" >&2
-    [[ -n "${token}" ]] || die "No token provided"
+    info "Using GitHub credentials for '${username}' from gh CLI…"
 
-    info "Updating ghcr-pull-secret in omp-system (user: ${username})…"
+    # Ensure read:packages scope is present.
+    if ! gh auth status 2>&1 | grep -q 'read:packages\|packages'; then
+        warn "Token may be missing read:packages scope."
+        warn "Run: gh auth refresh --scopes read:packages   then re-run this command."
+    fi
+
+    info "Updating ghcr-pull-secret in omp-system…"
     kubectl create secret docker-registry ghcr-pull-secret \
         -n omp-system \
         --docker-server=ghcr.io \
@@ -1072,7 +1081,7 @@ cmd_pull_secret() {
             --docker-password="${token}" \
             --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1 && updated=$((updated + 1))
     done
-    ok "PULL_SECRET_OK — updated omp-system + ${updated} session namespace(s)"
+    ok "GITHUB_PULL_SECRET_OK — user=${username}, updated omp-system + ${updated} session namespace(s)"
     info "Pods in ImagePullBackOff will recover automatically within ~30s."
 }
 
@@ -1096,8 +1105,7 @@ case "${SUBCOMMAND}" in
     tune)           cmd_tune "$@" ;;
     vault-add)      cmd_vault_add "$@" ;;
     vault-ls)       cmd_vault_ls "$@" ;;
-    pull-secret)      cmd_pull_secret "$@" ;;
-    auth)             cmd_auth "$@" ;;
+    github-pull-secret) cmd_github_pull_secret "$@" ;;
     port-forward)     cmd_port_forward "$@" ;;
     session-transfer) cmd_session_transfer "$@" ;;
     user-add)         cmd_user_add "$@" ;;
