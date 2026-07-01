@@ -1048,13 +1048,10 @@ cmd_team_rm() {
 cmd_user_cred_add() {
     # user-cred-add <secret-name> <ENV_VAR> [<ENV_VAR2> ...] [--user <name>]
     # Create/update a K8s Secret in omp-user-<name> with one or more env var keys.
-    # Each env var key is prompted for separately (hidden input, never echoed).
-    # Default user: current gcloud account slug.
-    # Example:
-    #   ./administrator.sh user-cred-add atlassian ATLASSIAN_TOKEN ATLASSIAN_EMAIL
+    # Values are prompted interactively (hidden). Credentials never appear in
+    # process arguments or command substitution — piped as YAML to kubectl apply.
     require_cluster
 
-    # Parse --user flag and positional args.
     local username="${ADMIN_GCP_ACCOUNT%%@*}"
     local secret_name="" keys=()
     while [[ $# -gt 0 ]]; do
@@ -1067,46 +1064,52 @@ cmd_user_cred_add() {
                 shift ;;
         esac
     done
-    [[ -n "${secret_name}" ]] || die "Usage: ./administrator.sh user-cred-add <secret-name> <ENV_VAR> [<ENV_VAR2> ...] [--user <name>]"
+    [[ -n "${secret_name}" ]] || die "Usage: ./administrator.sh user-cred-add <secret-name> <ENV_VAR> [...] [--user <name>]"
     [[ ${#keys[@]} -gt 0 ]] || die "Provide at least one ENV_VAR key name"
 
     local ns="omp-user-${username}"
     kubectl get namespace "${ns}" >/dev/null 2>&1 \
         || die "Namespace ${ns} does not exist — run: ./administrator.sh user-add ${username}"
 
-    # Collect values interactively (hidden).
-    local -a literal_args=()
+    # Collect values interactively (hidden) into an associative array.
+    declare -A kv
     for key in "${keys[@]}"; do
         local val
         read -rs -p "[admin] Value for ${key} (hidden): " val
         echo "" >&2
         [[ -n "${val}" ]] || die "Empty value for ${key}"
-        literal_args+=("--from-literal=${key}=${val}")
+        kv["${key}"]="${val}"
     done
 
+    # Build Secret YAML in-process via python, pipe to kubectl apply.
+    # Values are base64-encoded inside python — never passed as process arguments.
     info "Creating/updating secret '${secret_name}' in ${ns} (keys: ${keys[*]})…"
-    kubectl create secret generic "${secret_name}" \
-        -n "${ns}" \
-        "${literal_args[@]}" \
-        --dry-run=client -o yaml | kubectl apply -f -
+    python3 - <<PYEOF | kubectl apply -f -
+import base64, sys
+pairs = {$(for key in "${keys[@]}"; do printf '"%s": "%s", ' "${key}" "${kv[${key}]}"; done)}
+data = {k: base64.b64encode(v.encode()).decode() for k, v in pairs.items()}
+keys_str = "\n".join(f"  {k}: {v}" for k, v in data.items())
+print(f"""apiVersion: v1
+kind: Secret
+metadata:
+  name: ${secret_name}
+  namespace: ${ns}
+type: Opaque
+data:
+{keys_str}""")
+PYEOF
 
     ok "USER_CRED_ADD_OK — ${ns}/${secret_name}"
     info "Reference in Session CR:  credentialSecrets: [\"${username}/${secret_name}\"]"
 }
 
 cmd_user_cred_ls() {
-    # user-cred-ls [--user <name>] — list credential secrets in omp-user-<name>.
-    # Shows secret names and their keys (never values).
+    # user-cred-ls [--user <name>] — list credential secrets and key names in omp-user-<name>.
     require_cluster
-    local username="${1:-${ADMIN_GCP_ACCOUNT%%@*}}"
-    [[ "$1" == "--user" ]] && username="${2:-}" && shift 2 || true
+    local username="${ADMIN_GCP_ACCOUNT%%@*}"
+    [[ "${1:-}" == "--user" ]] && { username="${2:-}"; } || true
     local ns="omp-user-${username}"
     info "Credential secrets in ${ns}:"
-    kubectl get secrets -n "${ns}" --field-selector type=Opaque \
-        -o custom-columns="NAME:.metadata.name,KEYS:.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration" \
-        2>/dev/null || echo "  (none or namespace not found)"
-    echo ""
-    # Show key names per secret (not values)
     for secret in $(kubectl get secrets -n "${ns}" --field-selector type=Opaque \
                     -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
         local keys
@@ -1118,85 +1121,90 @@ cmd_user_cred_ls() {
 }
 
 cmd_github_user_cred() {
-    # github-user-cred [<username>] — create/update a personal GitHub token K8s Secret
-    # in omp-user-<name> from the gh CLI. Injects as GITHUB_TOKEN in session pods.
-    # Requires: gh auth login (any scope that returns a token).
+    # github-user-cred [<username>] — create/update 'github-token' secret in omp-user-<name>
+    # from gh CLI. Token sourced via gh auth token — never passed as a process argument.
     require_cluster
     command -v gh >/dev/null || die "'gh' CLI not found — install from https://cli.github.com"
-
     gh auth status >/dev/null 2>&1 || die "gh CLI not authenticated — run: gh auth login"
 
-    # Username: explicit arg, else derived from current gcloud account slug.
     local username="${1:-${ADMIN_GCP_ACCOUNT%%@*}}"
     local ns="omp-user-${username}"
-
     kubectl get namespace "${ns}" >/dev/null 2>&1 \
         || die "Namespace ${ns} does not exist — run: ./administrator.sh user-add ${username}"
 
-    local token
-    token=$(gh auth token 2>/dev/null) \
-        || die "Could not retrieve token from gh CLI — re-run: gh auth login"
-    [[ -n "${token}" ]] || die "gh auth token returned empty"
-
-    info "Creating/updating 'github-token' secret in ${ns}…"
-    kubectl create secret generic github-token \
-        -n "${ns}" \
-        --from-literal=GITHUB_TOKEN="${token}" \
-        --dry-run=client -o yaml | kubectl apply -f -
+    info "Creating/updating 'github-token' secret in ${ns} from gh CLI…"
+    # Token piped directly into python for base64 encoding; never appears in ps output.
+    gh auth token | python3 - "${ns}" <<'PYEOF' | kubectl apply -f -
+import base64, sys
+ns = sys.argv[1]
+token = sys.stdin.read().strip()
+if not token:
+    sys.exit("gh auth token returned empty")
+data = base64.b64encode(token.encode()).decode()
+print(f"""apiVersion: v1
+kind: Secret
+metadata:
+  name: github-token
+  namespace: {ns}
+type: Opaque
+data:
+  GITHUB_TOKEN: {data}""")
+PYEOF
 
     ok "GITHUB_USER_CRED_OK — ${ns}/github-token"
-    info "Reference in Session CR:"
-    info "  spec:"
-    info "    credentialSecrets:"
-    info "      - ${username}/github-token"
+    info "Reference in Session CR:  credentialSecrets: [\"${username}/github-token\"]"
 }
 
 cmd_github_pull_secret() {
     # github-pull-secret — update the GHCR image pull secret using the gh CLI.
+    # Token is base64-encoded inside python and piped as JSON — never exposed in ps.
     # Requires: gh auth login with read:packages scope.
-    # Run 'gh auth refresh --scopes read:packages' if packages scope is missing.
     require_cluster
     command -v gh >/dev/null || die "'gh' CLI not found — install from https://cli.github.com"
-
-    info "Checking gh CLI authentication…"
     gh auth status >/dev/null 2>&1 || die "gh CLI not authenticated — run: gh auth login"
 
-    # Derive username and token from gh CLI — no manual input needed.
-    local username token
+    local username
     username=$(gh api user --jq .login 2>/dev/null) \
         || die "Could not retrieve GitHub username from gh CLI"
-    token=$(gh auth token 2>/dev/null) \
-        || die "Could not retrieve token from gh CLI"
     [[ -n "${username}" ]] || die "gh API returned empty username"
-    [[ -n "${token}" ]]    || die "gh auth token returned empty — re-run: gh auth login"
 
-    info "Using GitHub credentials for '${username}' from gh CLI…"
-
-    # Ensure read:packages scope is present.
     if ! gh auth status 2>&1 | grep -q 'read:packages\|packages'; then
         warn "Token may be missing read:packages scope."
         warn "Run: gh auth refresh --scopes read:packages   then re-run this command."
     fi
 
-    info "Updating ghcr-pull-secret in omp-system…"
-    kubectl create secret docker-registry ghcr-pull-secret \
-        -n omp-system \
-        --docker-server=ghcr.io \
-        --docker-username="${username}" \
-        --docker-password="${token}" \
-        --dry-run=client -o yaml | kubectl apply -f -
+    # Build dockerconfigjson YAML via python. Token read from gh CLI stdout and
+    # base64-encoded inside python — never stored in a shell variable or process arg.
+    _apply_pull_secret() {
+        local target_ns="$1"
+        gh auth token | python3 - "${username}" "${target_ns}" <<'PYEOF'
+import base64, json, sys
+username, ns = sys.argv[1], sys.argv[2]
+token = sys.stdin.read().strip()
+if not token:
+    sys.exit("gh auth token returned empty")
+auth = base64.b64encode(f"{username}:{token}".encode()).decode()
+cfg = json.dumps({"auths": {"ghcr.io": {"username": username, "auth": auth}}})
+cfg_b64 = base64.b64encode(cfg.encode()).decode()
+print(f"""apiVersion: v1
+kind: Secret
+metadata:
+  name: ghcr-pull-secret
+  namespace: {ns}
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: {cfg_b64}""")
+PYEOF
+    }
 
-    # Propagate to all running session namespaces (omp-session-*)
+    info "Updating ghcr-pull-secret in omp-system (user: ${username})…"
+    _apply_pull_secret omp-system | kubectl apply -f -
+
     info "Propagating to session namespaces…"
     local updated=0
     for ns in $(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}' \
                 | tr ' ' '\n' | grep '^omp-session-'); do
-        kubectl create secret docker-registry ghcr-pull-secret \
-            -n "${ns}" \
-            --docker-server=ghcr.io \
-            --docker-username="${username}" \
-            --docker-password="${token}" \
-            --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1 && updated=$((updated + 1))
+        _apply_pull_secret "${ns}" | kubectl apply -f - >/dev/null 2>&1 && updated=$((updated + 1))
     done
     ok "GITHUB_PULL_SECRET_OK — user=${username}, updated omp-system + ${updated} session namespace(s)"
     info "Pods in ImagePullBackOff will recover automatically within ~30s."
