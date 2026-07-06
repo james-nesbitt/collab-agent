@@ -501,8 +501,6 @@ mnemopi:
   scoping: per-project-tagged
   noEmbeddings: true
   llmMode: smol
-providers:
-  memoryModel: qwen3-1.7b
 memories:
   minRolloutIdleHours: 6
   maxRolloutAgeDays: 30
@@ -513,9 +511,7 @@ memories:
     if [[ "${do_thinking}" == true ]]; then
         info "Adding automatic thinking-level tuning…"
         patched_config="${patched_config}
-defaultThinkingLevel: auto
-providers:
-  autoThinkingModel: qwen3-1.7b"
+defaultThinkingLevel: auto"
         ok "defaultThinkingLevel=auto"
     fi
 

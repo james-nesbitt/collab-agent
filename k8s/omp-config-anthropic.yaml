@@ -13,6 +13,10 @@ data:
       plan: anthropic/claude-opus-4-8
       slow: anthropic/claude-haiku-4-5
       smol: anthropic/claude-haiku-4-5
+    providers:
+      tinyModel: lfm2-350m
+      memoryModel: qwen3-1.7b
+      autoThinkingModel: qwen3-1.7b
     todo:
       eager: always
     search:
