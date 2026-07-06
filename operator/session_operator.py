@@ -711,6 +711,17 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
     # 2. ServiceAccount
     _create_or_skip(v1.create_namespaced_service_account, ns, _service_account(ns))
 
+    # 3. PVC omp-home (StatefulSet volumeClaimTemplate owns it after Option C;
+    #    explicit create is a no-op if the StatefulSet already created it via VCT)
+    _create_or_skip(v1.create_namespaced_persistent_volume_claim, ns, _pvc(ns))
+
+    # 4. ExternalSecret omp-creds (GSM subtrees → K8s Secret via ESO)
+    if subtrees:
+        _apply_custom_object(
+            "external-secrets.io", "v1", ns, "externalsecrets",
+            _external_secret(ns, subtrees, OMP_GSM_PROJECT),
+        )
+        logger.info("ExternalSecret omp-creds applied for subtrees %s in %s", subtrees, ns)
 
     cm = _configmap_from_master(ns, config_ref)
     has_cm = cm is not None
