@@ -128,15 +128,11 @@ no admin or GSM access required.
 ### Creating and referencing personal credential secrets
 
 ```bash
-# Create a secret in the team namespace (team member does this themselves)
-kubectl create secret generic jnesbitt-creds -n omp-team-<team> \
-  --from-literal=ATLASSIAN_TOKEN=xxx \
-  --from-literal=ATLASSIAN_EMAIL=jnesbitt@mirantis.com
+# Admin runs once to create the user namespace:
+./administrator.sh user-add jnesbitt
 
-# Update / rotate
-kubectl create secret generic jnesbitt-creds -n omp-team-<team> \
-  --from-literal=ATLASSIAN_TOKEN=yyy \
-  --dry-run=client -o yaml | kubectl apply -f -
+# User creates/rotates their own secret (values prompted hidden — safe from ps/history):
+./administrator.sh user-cred-add atlassian ATLASSIAN_TOKEN ATLASSIAN_EMAIL
 ```
 
 Reference one or more secrets in the Session CR:
@@ -145,11 +141,11 @@ Reference one or more secrets in the Session CR:
 spec:
   subtrees: ["shared"]         # vault creds (OLLAMA_CLOUD_API_KEY etc.)
   credentialSecrets:
-    - jnesbitt-creds           # personal creds — injected after vault, override on conflict
-    - another-secret           # multiple supported; later entries win
+    - jnesbitt/atlassian       # format: "<user>/<secret>" — operator reads omp-user-jnesbitt
+    - jnesbitt/github-token    # multiple supported; later entries win
 ```
 
-The operator copies each named Secret from `omp-team-<team>` into the session pod namespace
+The operator copies each named Secret from `omp-user-<user>` into the session pod namespace
 and injects it via `envFrom`. Team members can also list, describe, and delete their own
 Secrets — RBAC in `omp-team-<team>` grants full secrets CRUD in that namespace only.
 

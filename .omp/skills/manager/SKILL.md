@@ -56,14 +56,16 @@ metadata:
 spec:
   subtrees: ["shared"]           # platform vault creds (e.g. OLLAMA_CLOUD_API_KEY)
   team: <team>
-  credentialSecrets:             # personal K8s Secrets you create/rotate yourself
-    - jnesbitt-creds             # in omp-team-<team> namespace
+  credentialSecrets:             # personal K8s Secrets — format: "<user>/<secret>"
+    - jnesbitt/atlassian         # operator reads from omp-user-jnesbitt namespace
 ```
 Create/rotate personal creds (no admin needed):
 ```bash
-kubectl create secret generic jnesbitt-creds -n omp-team-<team> \
-  --from-literal=ATLASSIAN_TOKEN=xxx --from-literal=ATLASSIAN_EMAIL=me@mirantis.com \
-  --dry-run=client -o yaml | kubectl apply -f -
+# Admin runs once to create the user namespace:
+./administrator.sh user-add jnesbitt
+
+# User creates/rotates their own secret (values prompted hidden — safe from ps/history):
+./administrator.sh user-cred-add atlassian ATLASSIAN_TOKEN ATLASSIAN_EMAIL
 ```
 List available vault credential names (never values):
 ```bash
@@ -131,7 +133,8 @@ kubectl get session my-session -n omp-team-<team> -o jsonpath='{.status.joinLink
   ```bash
   printf '%s' "$MY_PAT" | ./administrator.sh auth work gh
   ```
-  Alternatively, store the PAT in GSM (`vault-add services/github/token`) and inject via `omp-creds`.
+  Alternatively, store the PAT as a user K8s Secret: `./administrator.sh github-user-cred` and
+  reference it as `credentialSecrets: ["jnesbitt/github-token"]`.
 
 - **If the browser-redirect OAuth can't open a browser in the pod** (e.g. `aws configure sso`):
   ```bash
@@ -181,6 +184,9 @@ kubectl get session my-session -n omp-team-<team> -o jsonpath='{.status.joinLink
   re-run `./administrator.sh setup`.
 - **Pod stuck / image pull error:** `kubectl describe pod omp -n omp-session-NAME` —
   check image tag and GHCR package visibility (must be public for anonymous pull).
+- **A var is missing / subtree exported nothing.** Check GSM labels:
+  `./administrator.sh vault-ls shared` (or `vault-ls users/<name>`). An empty subtree → session launches without
+  those creds.
 
 ## Session lifecycle notes
 

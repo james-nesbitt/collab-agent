@@ -32,18 +32,19 @@ metadata:
 spec:
   subtrees: ["shared"]            # platform creds (OLLAMA_CLOUD_API_KEY etc.)
   team: <team>                    # operator creates omp-session-<team>-my-session
-  credentialSecrets:              # personal creds — self-managed K8s Secrets
-    - jnesbitt-creds              # create/rotate via kubectl, no admin needed
+  credentialSecrets:              # personal creds — format: "<user>/<secret>"
+    - jnesbitt/atlassian          # operator reads from omp-user-jnesbitt namespace
 ```
 
-Create your personal credential secret in the team namespace:
+Create your personal credential secret:
 
 ```bash
-kubectl create secret generic jnesbitt-creds -n omp-team-<team> \
-  --from-literal=ATLASSIAN_TOKEN=xxx \
-  --from-literal=ATLASSIAN_EMAIL=jnesbitt@mirantis.com
+# Admin creates the user namespace once:
+./administrator.sh user-add jnesbitt
 
-# Rotate: --dry-run=client -o yaml | kubectl apply -f -
+# User manages their own secret (values prompted hidden):
+./administrator.sh user-cred-add atlassian ATLASSIAN_TOKEN ATLASSIAN_EMAIL
+# Rotate the same way — user-cred-add is idempotent (apply semantics)
 ```
 
 Multiple secrets are supported — list them in order; later entries override earlier on env var conflict.
@@ -79,7 +80,7 @@ metadata:
   name: work
   namespace: omp-system
 spec:
-  subtrees: ["services"]
+  subtrees: ["shared"]
   view: false
 EOF
 ```
@@ -176,7 +177,7 @@ metadata:
   name: work
   namespace: omp-system
 spec:
-  subtrees: ["services"]
+  subtrees: ["shared"]
   authBroker: true
 EOF
 
@@ -289,7 +290,7 @@ But guests are confined to that session's credentials.
 - **Collab link is empty.** The pod may have just restarted; trigger re-capture (above)
   and wait ~30 s. If still empty, exec into the session and check the omp pane directly.
 - **A var is missing / subtree exported nothing.** Check GSM labels:
-  `./administrator.sh vault-ls services`. An empty subtree → session launches without
+  `./administrator.sh vault-ls shared` (or `vault-ls users/<name>`). An empty subtree → session launches without
   those creds.
 - **A value isn't obfuscated.** The env-var name lacks a secret keyword — add a regex
   to `platform/secrets.yml` and re-run `./administrator.sh setup`.

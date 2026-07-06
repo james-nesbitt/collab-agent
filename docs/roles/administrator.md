@@ -78,8 +78,7 @@ One idempotent command does two things:
 2. Creates (or patches) the master `omp-config` ConfigMap in `omp-system` with:
    - Global secret obfuscation (`secrets.enabled: true`) so credential values are
      replaced with `#XXXX#` before any text reaches the model.
-   - `modelRoles`: default `claude-sonnet-4-6`, plan `claude-opus-4-8`, slow + smol
-     `claude-haiku-4-5`.
+   - `modelRoles`: default/plan `google/gemini-3.1-pro-preview`, slow `google/gemini-1.5-pro`, smol `google/gemini-1.5-flash`.
    - Portable agent tuning (editor/task defaults).
 
 You'll see `SETUP_OK`. Re-run any time you change `platform/` files or rotate config
@@ -97,7 +96,11 @@ Two extra capabilities are off by default:
 
 `tune` patches the master `omp-config` ConfigMap. Running pods pick it up on next
 restart (`kubectl delete pod omp -n omp-session-NAME` to force it immediately).
-Both capabilities run on local ONNX models (`qwen3-1.7b`), CPU-only. Expect `TUNE_OK`.
+Tiny-model weights (`lfm2-350m` ~212 MB for titles, `qwen3-1.7b` ~1.1 GB for memory/thinking)
+are baked into the session image and seeded to each session PVC on first pod start — no downloads
+at runtime. `tune` patches the master ConfigMap in `omp-system` only; to propagate to a running
+session, also patch its session-namespace ConfigMap (`omp-config` in `omp-session-*`) and restart
+the pod. Expect `TUNE_OK`.
 
 ## 4. Store credentials
 
@@ -151,14 +154,35 @@ spec:
 
 ### GHCR image pull secret
 
-Session pods pull images from GHCR. Keep the pull secret current whenever your
-GitHub PAT rotates (needs `read:packages` scope):
+Keep the pull secret current whenever your GitHub token rotates (needs `read:packages` scope):
 
 ```bash
-./administrator.sh pull-secret   # prompts for GitHub username and PAT (both hidden)
+./administrator.sh github-pull-secret   # auto-detects username + token from gh CLI
 ```
 
 Propagates automatically to all running session namespaces.
+
+## 4b. User credential namespaces
+
+For personal credentials that team members manage themselves without admin involvement:
+
+```bash
+./administrator.sh user-add <name>     # creates omp-user-<name> namespace + IAM
+./administrator.sh user-rm <name>      # removes namespace + IAM (prompts)
+```
+
+Once onboarded, the user creates their own K8s Secrets:
+
+```bash
+# Values prompted interactively (hidden) — never appear in process args or shell history
+./administrator.sh user-cred-add atlassian ATLASSIAN_TOKEN ATLASSIAN_EMAIL
+./administrator.sh user-cred-add github-token GITHUB_TOKEN   # or: github-user-cred
+./administrator.sh user-cred-ls                              # list names + keys, never values
+```
+
+Users reference secrets in Session CRs as `credentialSecrets: ["<name>/<secret>"]`.
+The operator resolves `omp-user-<name>` and copies the named Secret into the session pod
+namespace at provision time. No admin involvement needed for rotation.
 
 ## 5. Day to day
 

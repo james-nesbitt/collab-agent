@@ -29,7 +29,7 @@ Full reference: read `docs/roles/administrator.md`.
 | Permanently delete cluster + SAs + IAM | `./administrator.sh destroy` |
 | Apply ClusterSecretStore + omp-config ConfigMap | `./administrator.sh setup` |
 | Tune local-model features (mnemopi, auto thinking) | `./administrator.sh tune [--memory] [--thinking]` (no flag = both) |
-| Store a credential (value on **stdin**) | `printf '%s' "$VAL" \| ./administrator.sh vault-add services/github/token` |
+| Store a credential | `./administrator.sh vault-add shared/ollama-cloud-api-key` (prompts interactively) |
 | List vault entry NAMES (never values) | `./administrator.sh vault-ls [SUBTREE]` |
 | Auth a provider inside a session pod | `./administrator.sh auth NAME PROVIDER` (anthropic·gcloud·aws·aws-configure·az·gh) |
 | Port-forward a session pod to localhost | `./administrator.sh port-forward NAME LOCAL_PORT` |
@@ -37,6 +37,10 @@ Full reference: read `docs/roles/administrator.md`.
 | Onboard a team (idempotent) | `./administrator.sh team-add <team>` |
 | List teams and bound groups | `./administrator.sh team-ls` |
 | Remove a team | `./administrator.sh team-rm <team>` (prompts; warns if sessions exist) |
+| Onboard a user (personal cred namespace) | `./administrator.sh user-add <name>` |
+| Remove a user | `./administrator.sh user-rm <name>` (prompts) |
+| Add/update a personal K8s Secret (hidden prompts) | `./administrator.sh user-cred-add <secret> <KEY> [<KEY2>...] [--user <name>]` |
+| List personal K8s Secret names + keys | `./administrator.sh user-cred-ls [--user <name>]` |
 
 `provision`, `bootstrap`, `credentials`, and `setup` are idempotent.
 
@@ -73,8 +77,20 @@ Full reference: read `docs/roles/administrator.md`.
   `OMP_GROUP_DOMAIN=example.com ./administrator.sh team-add myteam`.
   See [access-control.md](skill://administrator/../../docs/access-control.md).
 
+- **Onboard a user (personal creds):** `user-add <name>` creates `omp-user-<name>`, grants
+  that user secrets CRUD in that namespace and `secretmanager.viewer` IAM (vault-ls).
+  Users then self-manage K8s Secrets with `user-cred-add` and reference them in Session CRs
+  as `credentialSecrets: ["<name>/<secret>"]`. Values are prompted hidden, base64-encoded
+  in Python, and piped to `kubectl apply` — never appear in process args or shell history.
+  `github-user-cred [<name>]` creates the `github-token` secret from `gh auth token`.
+  `user-rm <name>` removes the namespace and IAM binding.
+
 - **Enable local-model features:** `tune --memory` and/or `--thinking`; no flag = both.
   Patches the omp-config ConfigMap; running pods pick it up on next restart.
+  Tiny-model weights (`lfm2-350m` ~212 MB, `qwen3-1.7b` ~1.1 GB) are baked into the
+  session image and seeded to the session PVC on first pod start — no downloads at runtime.
+  `setup` updates the master ConfigMap in `omp-system` only; running session pods keep
+  their stale copy until you manually patch their session-namespace ConfigMap and restart.
 
 ## Platform-wide environment injection (omp-bootstrap-env)
 
