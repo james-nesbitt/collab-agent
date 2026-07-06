@@ -1026,6 +1026,8 @@ case "${SUBCOMMAND}" in
     setup)          cmd_setup "$@" ;;
     tune)           cmd_tune "$@" ;;
     vault-add)      cmd_vault_add "$@" ;;
+    vault-ls)       cmd_vault_ls "$@" ;;
+    github-pull-secret) cmd_github_pull_secret "$@" ;;
     team-add)         cmd_team_add "$@" ;;
     team-ls)          cmd_team_ls "$@" ;;
     team-rm)          cmd_team_rm "$@" ;;

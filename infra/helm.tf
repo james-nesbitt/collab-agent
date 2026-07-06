@@ -24,7 +24,7 @@ resource "helm_release" "omp_platform" {
   chart            = "../charts/omp-platform"
   namespace        = "omp-system"
   create_namespace = true
-  wait             = true
+  wait             = false
 
   values = [yamlencode({
     project          = var.project
