@@ -17,6 +17,21 @@ if [[ ! -d "${WORK_DIR}/.omp" ]]; then
     cp -a /opt/omp/work-template/.omp "${WORK_DIR}/.omp"
 fi
 
+# Seed HF tiny-model cache from image layer (one-time per session PVC).
+# Copies only model directories that aren't already on the PVC so that
+# any newer versions downloaded by omp at runtime are not overwritten.
+if [[ -d /opt/omp/hf-cache/hub ]]; then
+    HF_HUB_DIR="${HOME}/.cache/huggingface/hub"
+    mkdir -p "${HF_HUB_DIR}"
+    for _model_dir in /opt/omp/hf-cache/hub/models--*/; do
+        _model_name="$(basename "${_model_dir}")"
+        if [[ ! -d "${HF_HUB_DIR}/${_model_name}" ]]; then
+            cp -a "${_model_dir}" "${HF_HUB_DIR}/"
+        fi
+    done
+    unset _model_dir _model_name HF_HUB_DIR
+fi
+
 # Render session name placeholder
 sed -i "s/__SESSION_NAME__/${OMP_SESSION_NAME}/g" "${WORK_DIR}/.omp/AGENTS.md"
 

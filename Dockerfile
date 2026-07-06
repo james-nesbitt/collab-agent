@@ -104,6 +104,21 @@ RUN chown -R omp:omp /opt/omp && \
     cp /home/omp/.bun/install/global/node_modules/@oh-my-pi/pi-natives-linux-x64/pi_natives.linux-x64-modern.node /usr/local/bin/ && \
     cp /home/omp/.bun/install/global/node_modules/@oh-my-pi/pi-natives-linux-x64/pi_natives.linux-x64-baseline.node /usr/local/bin/
 
+# ── 6b. Pre-download tiny-model ONNX weights (as user omp) ──────────────────
+# Weights are baked into the image at /opt/omp/hf-cache/ and seeded to the
+# session PVC on first pod start by entrypoint.sh (one-time copy per PVC).
+# Only q4 quantisation + tokenizer/config files are fetched (~1.3 GB total).
+# All sessions share the baked weights; no per-session download required.
+USER omp
+RUN pip install --quiet --no-cache-dir huggingface_hub && \
+    python3 - <<'PYEOF'
+from huggingface_hub import snapshot_download
+PATTERNS = ["*q4*", "tokenizer*", "config*", "special_tokens*", "generation_config*"]
+for repo in ["onnx-community/LFM2-350M-ONNX", "onnx-community/Qwen3-1.7B-ONNX"]:
+    snapshot_download(repo, cache_dir="/opt/omp/hf-cache/hub", allow_patterns=PATTERNS)
+PYEOF
+USER root
+
 # ── 7. Entrypoint ────────────────────────────────────────────────────────────
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
