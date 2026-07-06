@@ -89,8 +89,9 @@ Full reference: read `docs/roles/administrator.md`.
   Patches the omp-config ConfigMap; running pods pick it up on next restart.
   Tiny-model weights (`lfm2-350m` ~212 MB, `qwen3-1.7b` ~1.1 GB) are baked into the
   session image and seeded to the session PVC on first pod start — no downloads at runtime.
-  `setup` updates the master ConfigMap in `omp-system` only; running session pods keep
-  their stale copy until you manually patch their session-namespace ConfigMap and restart.
+  `setup`/`tune` update the master ConfigMap in `omp-system`; the operator re-syncs it
+  (and copied secrets) into session namespaces on every reconcile — bump the `restartedAt`
+  annotation to propagate + restart.
 
 ## Platform-wide environment injection (omp-bootstrap-env)
 

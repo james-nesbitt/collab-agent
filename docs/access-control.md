@@ -145,6 +145,10 @@ spec:
     - jnesbitt/github-token    # multiple supported; later entries win
 ```
 
+Ownership is enforced at admission: the `omp-credential-secrets-ownership` ValidatingAdmissionPolicy
+rejects any Session CR whose `credentialSecrets` entries are not prefixed with the requesting user's
+username (admins and the operator are exempt).
+
 The operator copies each named Secret from `omp-user-<user>` into the session pod namespace
 and injects it via `envFrom`. Team members can also list, describe, and delete their own
 Secrets — RBAC in `omp-team-<team>` grants full secrets CRUD in that namespace only.

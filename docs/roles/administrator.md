@@ -94,13 +94,11 @@ Two extra capabilities are off by default:
 ./administrator.sh tune               # both
 ```
 
-`tune` patches the master `omp-config` ConfigMap. Running pods pick it up on next
-restart (`kubectl delete pod omp -n omp-session-NAME` to force it immediately).
-Tiny-model weights (`lfm2-350m` ~212 MB for titles, `qwen3-1.7b` ~1.1 GB for memory/thinking)
-are baked into the session image and seeded to each session PVC on first pod start — no downloads
-at runtime. `tune` patches the master ConfigMap in `omp-system` only; to propagate to a running
-session, also patch its session-namespace ConfigMap (`omp-config` in `omp-session-*`) and restart
-the pod. Expect `TUNE_OK`.
+`tune` patches the master `omp-config` ConfigMap. Tiny-model weights (`lfm2-350m` ~212 MB for titles,
+`qwen3-1.7b` ~1.1 GB for memory/thinking) are baked into the session image and seeded to each session
+PVC on first pod start — no downloads at runtime. `setup`/`tune` update the master ConfigMap in
+`omp-system`; the operator re-syncs it (and copied secrets) into session namespaces on every reconcile
+— bump the `restartedAt` annotation to propagate + restart. Expect `TUNE_OK`.
 
 ## 4. Store credentials
 

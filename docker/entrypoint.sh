@@ -17,19 +17,24 @@ if [[ ! -d "${WORK_DIR}/.omp" ]]; then
     cp -a /opt/omp/work-template/.omp "${WORK_DIR}/.omp"
 fi
 
-# Seed HF tiny-model cache from image layer (one-time per session PVC).
-# Copies only model directories that aren't already on the PVC so that
-# any newer versions downloaded by omp at runtime are not overwritten.
-if [[ -d /opt/omp/hf-cache/hub ]]; then
-    HF_HUB_DIR="${HOME}/.cache/huggingface/hub"
-    mkdir -p "${HF_HUB_DIR}"
-    for _model_dir in /opt/omp/hf-cache/hub/models--*/; do
-        _model_name="$(basename "${_model_dir}")"
-        if [[ ! -d "${HF_HUB_DIR}/${_model_name}" ]]; then
-            cp -a "${_model_dir}" "${HF_HUB_DIR}/"
-        fi
+# Seed tiny-model weights from the image layer (one-time per session PVC).
+# Target must match omp's transformers.js env.cacheDir. Per-model copy only
+# if absent so runtime-refreshed files are never overwritten.
+if [[ -d /opt/omp/hf-cache ]]; then
+    HF_SEED_TARGET="${HOME}/.cache/huggingface/transformers"
+    for _org_dir in /opt/omp/hf-cache/*/; do
+        [[ -d "${_org_dir}" ]] || continue
+        _org="$(basename "${_org_dir}")"
+        for _model_dir in "${_org_dir}"*/; do
+            [[ -d "${_model_dir}" ]] || continue
+            _model="$(basename "${_model_dir}")"
+            if [[ ! -d "${HF_SEED_TARGET}/${_org}/${_model}" ]]; then
+                mkdir -p "${HF_SEED_TARGET}/${_org}"
+                cp -a "${_model_dir}" "${HF_SEED_TARGET}/${_org}/${_model}"
+            fi
+        done
     done
-    unset _model_dir _model_name HF_HUB_DIR
+    unset _org_dir _org _model_dir _model HF_SEED_TARGET
 fi
 
 # Render session name placeholder

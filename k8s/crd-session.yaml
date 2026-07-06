@@ -97,11 +97,12 @@ spec:
                   description: >-
                     Personal credentials to inject into the session pod.
                     Format: "<user>/<secret-name>" — the operator reads secret
-                    <secret-name> from namespace omp-user-<user>. Only secrets
-                    in that user's own namespace are accessible; users cannot
-                    reference another user's credentials. Later entries win on
-                    env var conflict. Example: ["jnesbitt/atlassian-token",
-                    "jnesbitt/ollama-key"]
+                    <secret-name> from namespace omp-user-<user>. Ownership is
+                    enforced at admission by the omp-credential-secrets-ownership
+                    ValidatingAdmissionPolicy: entries must carry the requesting
+                    user's own username prefix (platform admins and the operator
+                    are exempt). Later entries win on env var conflict. Example:
+                    ["jnesbitt/atlassian-token", "jnesbitt/ollama-key"]
             status:
               type: object
               properties:

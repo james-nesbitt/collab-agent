@@ -8,6 +8,7 @@ GSM is accessed for secret metadata only (list, never access_secret_version).
 Credentials arrive in pods via ESO → K8s Secret → envFrom.
 """
 
+import base64
 import logging
 import os
 import re
@@ -339,9 +340,17 @@ def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_s
                     name="omp",
                     image=image,
                     image_pull_policy="Always",
+                    resources=k8s.V1ResourceRequirements(
+                        requests={"cpu": "500m", "memory": "1Gi"},
+                        limits={"memory": "12Gi"},
+                    ),
                     env=env,
                     env_from=[
-                        # omp-creds: ESO-synced from spec.subtrees (shared/platform creds)
+                        # omp-bootstrap-env: platform bootstrap keys (lowest precedence)
+                        k8s.V1EnvFromSource(
+                            secret_ref=k8s.V1SecretEnvSource(name="omp-bootstrap-env", optional=True)
+                        ),
+                        # omp-creds: ESO-synced from spec.subtrees
                         k8s.V1EnvFromSource(
                             secret_ref=k8s.V1SecretEnvSource(
                                 name="omp-creds", optional=True
@@ -373,6 +382,10 @@ def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_s
                         name="auth-broker",
                         image=image,
                         image_pull_policy="Always",
+                        resources=k8s.V1ResourceRequirements(
+                            requests={"cpu": "50m", "memory": "128Mi"},
+                            limits={"memory": "512Mi"},
+                        ),
                         command=["omp", "auth-broker", "serve",
                                  "--bind", "localhost:9999"],
                         env=[
@@ -434,7 +447,7 @@ def _apply_network_policy(ns: str, body: dict) -> None:
 
 
 def _copy_secret(v1: k8s.CoreV1Api, ns: str, secret_name: str, src_ns: str = "omp-system") -> bool:
-    """Copy a Secret from src_ns into ns. Returns True if copied/already present, False if absent."""
+    """Copy/refresh a Secret from src_ns into ns. True if present, False if source absent."""
     try:
         src = v1.read_namespaced_secret(secret_name, src_ns)
     except k8s.ApiException as exc:
@@ -446,7 +459,12 @@ def _copy_secret(v1: k8s.CoreV1Api, ns: str, secret_name: str, src_ns: str = "om
         type=src.type,
         data=src.data,
     )
-    _create_or_skip(v1.create_namespaced_secret, ns, dst)
+    try:
+        v1.create_namespaced_secret(ns, dst)
+    except k8s.ApiException as exc:
+        if exc.status != 409:
+            raise
+        v1.replace_namespaced_secret(secret_name, ns, dst)
     return True
 
 
@@ -462,14 +480,11 @@ def _ensure_broker_token_secret(v1: k8s.CoreV1Api, ns: str) -> str:
     secret_name = "auth-broker-token"
     try:
         secret = v1.read_namespaced_secret(secret_name, ns)
-        return (secret.data or {}).get("token", b"").decode() if isinstance(
-            (secret.data or {}).get("token", b""), bytes
-        ) else (secret.data or {}).get("token", "")
+        return base64.b64decode((secret.data or {}).get("token", "")).decode()
     except k8s.ApiException as exc:
         if exc.status != 404:
             raise
     # Generate and store a fresh token
-    import base64
     token = secrets.token_hex(32)
     secret = k8s.V1Secret(
         metadata=k8s.V1ObjectMeta(name=secret_name, namespace=ns),
@@ -633,7 +648,7 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
     8. Wait for Pod Ready
     9. Capture collab join link via pod exec, set status.phase=Hosting
     """
-    subtrees: list = list(spec.get("subtrees", ["services"]))
+    subtrees: list = list(spec.get("subtrees", []))
     view: bool = bool(spec.get("view", False))
     config_ref: str = spec.get("configRef", "omp-config")
     extra_env: dict = dict(spec.get("env", {}))
@@ -671,10 +686,14 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
     if has_pull_secret:
         logger.info("Copied ghcr-pull-secret into %s", ns)
 
+    # 2b'. Platform bootstrap env (e.g. GEMINI_API_KEY) — lowest-precedence envFrom.
+    if _copy_secret(v1, ns, "omp-bootstrap-env"):
+        logger.info("Synced omp-bootstrap-env into %s", ns)
+
     # 2c. Copy personal credential secrets from omp-user-<user> namespaces.
-    # Format: "<user>/<secret-name>" — reads secret <secret-name> from namespace
-    # omp-user-<user>. Each user only controls their own omp-user-<user> namespace
-    # so they cannot reference another user's credentials.
+    # Ownership ("you may only reference your own <user>/ prefix") is enforced
+    # at admission by the omp-credential-secrets-ownership ValidatingAdmissionPolicy
+    # — the operator itself performs no requester-identity check.
     copied_user_secrets: list[str] = []
     for entry in credential_secrets:
         if "/" not in entry:
@@ -692,7 +711,12 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
     cm = _configmap_from_master(ns, config_ref)
     has_cm = cm is not None
     if cm:
-        _create_or_skip(v1.create_namespaced_config_map, ns, cm)
+        try:
+            v1.create_namespaced_config_map(ns, cm)
+        except k8s.ApiException as exc:
+            if exc.status != 409:
+                raise
+            v1.replace_namespaced_config_map("omp-config", ns, cm)
 
     # 6. NetworkPolicies
     for np in _network_policies(ns):

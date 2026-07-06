@@ -116,6 +116,7 @@ render() {
     OMP_IMAGE_TAG="${OMP_IMAGE_TAG}" \
     OMP_SESSION_IMAGE_TAG="${OMP_SESSION_IMAGE_TAG}" \
     OMP_GROUP_DOMAIN="${OMP_GROUP_DOMAIN}" \
+    ADMIN_GCP_ACCOUNT="${ADMIN_GCP_ACCOUNT}" \
         envsubst < "${f}"
 }
 
@@ -347,6 +348,9 @@ cmd_bootstrap() {
     # 3. Apply CRD, RBAC, operator Deployment (envsubst rendered)
     info "Applying Session CRD…"
     render "${SCRIPT_DIR}/k8s/crd-session.yaml" | kubectl apply -f -
+
+    info "Applying credentialSecrets ownership policy…"
+    render "${SCRIPT_DIR}/k8s/vap-credential-secrets.yaml" | kubectl apply -f -
 
     info "Applying operator RBAC…"
     render "${SCRIPT_DIR}/k8s/operator-rbac.yaml" | kubectl apply -f -
@@ -1073,38 +1077,48 @@ cmd_user_cred_add() {
     done
     [[ -n "${secret_name}" ]] || die "Usage: ./administrator.sh user-cred-add <secret-name> <ENV_VAR> [...] [--user <name>]"
     [[ ${#keys[@]} -gt 0 ]] || die "Provide at least one ENV_VAR key name"
+    [[ "${secret_name}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] \
+        || die "Invalid secret name '${secret_name}' (must be a DNS-1123 label)"
+    for key in "${keys[@]}"; do
+        [[ "${key}" =~ ^[A-Z][A-Z0-9_]*$ ]] || die "Invalid env var key '${key}' (must match ^[A-Z][A-Z0-9_]*$)"
+    done
 
     local ns="omp-user-${username}"
     kubectl get namespace "${ns}" >/dev/null 2>&1 \
         || die "Namespace ${ns} does not exist — run: ./administrator.sh user-add ${username}"
 
-    # Collect values interactively (hidden) into an associative array.
-    declare -A kv
+    # Collect values (hidden) into exported env vars — never argv, never code text.
+    local -a exported=()
+    local key val
     for key in "${keys[@]}"; do
-        local val
         read -rs -p "[admin] Value for ${key} (hidden): " val
         echo "" >&2
         [[ -n "${val}" ]] || die "Empty value for ${key}"
-        kv["${key}"]="${val}"
+        export "CRED_${key}=${val}"
+        exported+=("CRED_${key}")
     done
+    val=""
 
-    # Build Secret YAML in-process via python, pipe to kubectl apply.
-    # Values are base64-encoded inside python — never passed as process arguments.
     info "Creating/updating secret '${secret_name}' in ${ns} (keys: ${keys[*]})…"
-    python3 - <<PYEOF | kubectl apply -f -
-import base64, sys
-pairs = {$(for key in "${keys[@]}"; do printf '"%s": "%s", ' "${key}" "${kv[${key}]}"; done)}
-data = {k: base64.b64encode(v.encode()).decode() for k, v in pairs.items()}
-keys_str = "\n".join(f"  {k}: {v}" for k, v in data.items())
+    CRED_KEYS="${keys[*]}" SECRET_NAME="${secret_name}" SECRET_NS="${ns}" \
+    python3 - <<'PYEOF' | kubectl apply -f -
+import base64, os
+keys = os.environ["CRED_KEYS"].split()
+name, ns = os.environ["SECRET_NAME"], os.environ["SECRET_NS"]
+rows = "\n".join(
+    f"  {k}: {base64.b64encode(os.environ['CRED_' + k].encode()).decode()}" for k in keys
+)
 print(f"""apiVersion: v1
 kind: Secret
 metadata:
-  name: ${secret_name}
-  namespace: ${ns}
+  name: {name}
+  namespace: {ns}
 type: Opaque
 data:
-{keys_str}""")
+{rows}""")
 PYEOF
+    local v
+    for v in "${exported[@]}"; do unset "${v}"; done
 
     ok "USER_CRED_ADD_OK — ${ns}/${secret_name}"
     info "Reference in Session CR:  credentialSecrets: [\"${username}/${secret_name}\"]"
@@ -1116,6 +1130,8 @@ cmd_user_cred_ls() {
     local username="${ADMIN_GCP_ACCOUNT%%@*}"
     [[ "${1:-}" == "--user" ]] && { username="${2:-}"; } || true
     local ns="omp-user-${username}"
+    kubectl get namespace "${ns}" >/dev/null 2>&1 \
+        || die "Namespace ${ns} does not exist — run: ./administrator.sh user-add ${username}"
     info "Credential secrets in ${ns}:"
     for secret in $(kubectl get secrets -n "${ns}" --field-selector type=Opaque \
                     -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
@@ -1140,13 +1156,13 @@ cmd_github_user_cred() {
         || die "Namespace ${ns} does not exist — run: ./administrator.sh user-add ${username}"
 
     info "Creating/updating 'github-token' secret in ${ns} from gh CLI…"
-    # Token piped directly into python for base64 encoding; never appears in ps output.
-    gh auth token | python3 - "${ns}" <<'PYEOF' | kubectl apply -f -
-import base64, sys
-ns = sys.argv[1]
-token = sys.stdin.read().strip()
+    GH_TOKEN_VALUE="$(gh auth token 2>/dev/null)" SECRET_NS="${ns}" \
+    python3 - <<'PYEOF' | kubectl apply -f -
+import base64, os, sys
+token = os.environ.get("GH_TOKEN_VALUE", "").strip()
 if not token:
-    sys.exit("gh auth token returned empty")
+    sys.exit("gh auth token returned empty — re-run: gh auth login")
+ns = os.environ["SECRET_NS"]
 data = base64.b64encode(token.encode()).decode()
 print(f"""apiVersion: v1
 kind: Secret
@@ -1182,14 +1198,14 @@ cmd_github_pull_secret() {
 
     # Build dockerconfigjson YAML via python. Token read from gh CLI stdout and
     # base64-encoded inside python — never stored in a shell variable or process arg.
-    _apply_pull_secret() {
-        local target_ns="$1"
-        gh auth token | python3 - "${username}" "${target_ns}" <<'PYEOF'
-import base64, json, sys
-username, ns = sys.argv[1], sys.argv[2]
-token = sys.stdin.read().strip()
-if not token:
-    sys.exit("gh auth token returned empty")
+    export GH_PS_TOKEN="$(gh auth token 2>/dev/null)"
+    [[ -n "${GH_PS_TOKEN}" ]] || die "gh auth token returned empty — re-run: gh auth login"
+
+    _apply_pull_secret() {   # $1 = target namespace
+        GH_PS_USER="${username}" GH_PS_NS="$1" python3 - <<'PYEOF'
+import base64, json, os
+username, ns = os.environ["GH_PS_USER"], os.environ["GH_PS_NS"]
+token = os.environ["GH_PS_TOKEN"].strip()
 auth = base64.b64encode(f"{username}:{token}".encode()).decode()
 cfg = json.dumps({"auths": {"ghcr.io": {"username": username, "auth": auth}}})
 cfg_b64 = base64.b64encode(cfg.encode()).decode()
@@ -1213,6 +1229,7 @@ PYEOF
                 | tr ' ' '\n' | grep '^omp-session-'); do
         _apply_pull_secret "${ns}" | kubectl apply -f - >/dev/null 2>&1 && updated=$((updated + 1))
     done
+    unset GH_PS_TOKEN
     ok "GITHUB_PULL_SECRET_OK — user=${username}, updated omp-system + ${updated} session namespace(s)"
     info "Pods in ImagePullBackOff will recover automatically within ~30s."
 }
