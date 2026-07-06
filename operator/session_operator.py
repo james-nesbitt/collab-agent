@@ -407,22 +407,25 @@ def _create_or_skip(fn, *args) -> None:
 def _apply_custom_object(
     group: str, version: str, namespace: str, plural: str, body: dict
 ) -> None:
-    """Create a namespaced custom object; ignore AlreadyExists."""
+    """Server-side apply a namespaced custom object (upsert, drift-safe)."""
     custom = k8s.CustomObjectsApi()
-    try:
-        custom.create_namespaced_custom_object(group, version, namespace, plural, body)
-    except k8s.ApiException as exc:
-        if exc.status != 409:
-            raise
+    custom.patch_namespaced_custom_object(
+        group, version, namespace, plural, body["metadata"]["name"], body,
+        field_manager="omp-operator",
+        force=True,
+        _content_type="application/apply-patch+yaml",
+    )
 
 
 def _apply_network_policy(ns: str, body: dict) -> None:
+    """Server-side apply a NetworkPolicy (upsert, drift-safe)."""
     net = k8s.NetworkingV1Api()
-    try:
-        net.create_namespaced_network_policy(ns, body)
-    except k8s.ApiException as exc:
-        if exc.status != 409:
-            raise
+    net.patch_namespaced_network_policy(
+        body["metadata"]["name"], ns, body,
+        field_manager="omp-operator",
+        force=True,
+        _content_type="application/apply-patch+yaml",
+    )
 
 
 
@@ -712,12 +715,13 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
     cm = _configmap_from_master(ns, config_ref)
     has_cm = cm is not None
     if cm:
-        try:
-            v1.create_namespaced_config_map(ns, cm)
-        except k8s.ApiException as exc:
-            if exc.status != 409:
-                raise
-            v1.replace_namespaced_config_map("omp-config", ns, cm)
+        # SSA patch: upserts the ConfigMap on create and drift; field_manager owns config data.
+        v1.patch_namespaced_config_map(
+            "omp-config", ns, cm,
+            field_manager="omp-operator",
+            force=True,
+            _content_type="application/apply-patch+yaml",
+        )
 
     # 6. NetworkPolicies
     for np in _network_policies(ns):
