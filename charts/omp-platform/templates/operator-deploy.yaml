@@ -18,7 +18,7 @@ spec:
         - name: ghcr-pull-secret
       containers:
         - name: operator
-          image: "{{ .Values.registry }}/omp-operator:{{ .Values.operatorImageTag }}"
+          image: "{{ .Values.operatorRegistry | default .Values.registry }}/omp-operator:{{ .Values.operatorImageTag }}"
           imagePullPolicy: Always
           env:
             - name: OMP_SESSION_IMAGE

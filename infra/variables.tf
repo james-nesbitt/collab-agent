@@ -50,6 +50,12 @@ variable "registry" {
   default     = "ghcr.io/james-nesbitt/collab-agent"
 }
 
+variable "operator_registry" {
+  type        = string
+  description = "Container registry base path for the omp-operator image. Empty falls back to var.registry. Set to the Artifact Registry path when running a locally-built operator."
+  default     = ""
+}
+
 variable "session_image_tag" {
   type        = string
   description = "Image tag for session container"

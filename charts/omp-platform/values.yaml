@@ -7,6 +7,10 @@ groupDomain: "mirantis.com"
 
 # Image settings
 registry: "ghcr.io/james-nesbitt/collab-agent"
+# operatorRegistry: base path for the omp-operator image only. Empty falls back to
+# `registry`. Set to the Artifact Registry path when running a locally-built
+# operator that isn't published to GHCR (e.g. pre-merge Option B/C fixes).
+operatorRegistry: ""
 # sessionImageTag: omp-session image tag. NOTE: the 2026-07-06 daily-rebuild omp
 # binary has a fatal `getSuggestions` regression ("K7 is not a function") that
 # crashes the process on slash-command entry (e.g. /collab) and the startup

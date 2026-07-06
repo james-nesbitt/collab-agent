@@ -33,6 +33,7 @@ resource "helm_release" "omp_platform" {
     adminAccount     = var.admin_gcp_account
     groupDomain      = var.group_domain
     registry         = var.registry
+    operatorRegistry = var.operator_registry
     sessionImageTag  = var.session_image_tag
     operatorImageTag = var.operator_image_tag
     relay            = var.relay
