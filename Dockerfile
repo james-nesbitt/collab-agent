@@ -104,6 +104,22 @@ RUN chown -R omp:omp /opt/omp && \
     cp /home/omp/.bun/install/global/node_modules/@oh-my-pi/pi-natives-linux-x64/pi_natives.linux-x64-modern.node /usr/local/bin/ && \
     cp /home/omp/.bun/install/global/node_modules/@oh-my-pi/pi-natives-linux-x64/pi_natives.linux-x64-baseline.node /usr/local/bin/
 
+# ── 6b. Pre-download tiny-model weights (transformers.js FileCache layout) ──
+# Layout MUST match @huggingface/transformers FileCache: <cacheDir>/<repo-id>/<file>
+# (the cache key for revision 'main' is literally "<repo-id>/<file>").
+# entrypoint.sh seeds these into ~/.cache/huggingface/transformers on first pod
+# start per session PVC. curl -f makes a 404 fail the build loudly.
+RUN set -eu; \
+    CACHE=/opt/omp/hf-cache; \
+    for repo in onnx-community/LFM2-350M-ONNX onnx-community/Qwen3-1.7B-ONNX; do \
+        for f in config.json tokenizer.json tokenizer_config.json generation_config.json onnx/model_q4.onnx; do \
+            mkdir -p "${CACHE}/${repo}/$(dirname "${f}")"; \
+            curl -fsSL --retry 3 -o "${CACHE}/${repo}/${f}" \
+                "https://huggingface.co/${repo}/resolve/main/${f}"; \
+        done; \
+    done; \
+    chown -R omp:omp "${CACHE}"
+
 # ── 7. Entrypoint ────────────────────────────────────────────────────────────
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

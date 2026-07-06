@@ -26,14 +26,16 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["create", "delete", "get", "list", "watch"]
-  # Within session namespaces — write-only for secrets (copies of bootstrap env + pull secret);
-  # operator never reads omp-creds or any session credential secret
   - apiGroups: [""]
     resources: ["pods", "pods/exec", "persistentvolumeclaims", "configmaps", "serviceaccounts"]
     verbs: ["create", "get", "list", "watch", "delete", "update", "patch"]
+  # Secrets: write cluster-wide (copies into session namespaces) + get for
+  # source reads (omp-user-<user> personal creds, per-session auth-broker-token).
+  # list/watch deliberately omitted; bulk listing remains scoped to omp-system
+  # via the omp-operator-system-secrets Role below.
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["create", "update", "patch", "delete"]
+    verbs: ["get", "create", "update", "patch", "delete"]
   # NetworkPolicy
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
@@ -53,6 +55,15 @@ rules:
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
     verbs: ["get", "list", "watch"]
+  # Team pod access: operator creates Role+RoleBinding granting teams exec/log in session namespaces.
+  # Privilege-escalation admission requires the operator to hold every permission it grants.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # pods/log included so the operator can put it in the team Role without escalation rejection
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

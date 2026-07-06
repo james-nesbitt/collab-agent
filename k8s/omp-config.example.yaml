@@ -15,6 +15,12 @@ data:
       plan: google/gemini-3.1-pro-preview
       slow: google/gemini-1.5-pro
       smol: google/gemini-1.5-flash
+    providers:
+      # Local ONNX tiny-models. Weights cache to session PVC (~/.cache/huggingface/).
+      # CPU-only q4 inference; warm loads sub-3s. First use downloads from HuggingFace.
+      tinyModel: lfm2-350m        # ~212 MB — session titles, best speed/quality
+      memoryModel: qwen3-1.7b     # ~1.1 GB — Mnemopi extraction, highest precision
+      autoThinkingModel: qwen3-1.7b  # auto-thinking classifier, reuses memory model
     todo:
       eager: always
     search:

@@ -18,6 +18,58 @@ platform config and vault operations use `./administrator.sh`.
   Deployment is Available.
 - No GPG key, no vault passphrase, no vault init.
 
+## Team sessions
+
+If your team has been onboarded (Workspace group created, `team-add` run by the admin),
+create sessions in your team's namespace with `spec.team`:
+
+```yaml
+apiVersion: omp.mirantis.io/v1alpha1
+kind: Session
+metadata:
+  name: my-session
+  namespace: omp-team-<team>     # must match spec.team
+spec:
+  subtrees: ["shared"]            # platform creds (OLLAMA_CLOUD_API_KEY etc.)
+  team: <team>                    # operator creates omp-session-<team>-my-session
+  credentialSecrets:              # personal creds — format: "<user>/<secret>"
+    - jnesbitt/atlassian          # operator reads from omp-user-jnesbitt namespace
+```
+
+Create your personal credential secret:
+
+```bash
+# Admin creates the user namespace once:
+./administrator.sh user-add jnesbitt
+
+# User manages their own secret (values prompted hidden):
+./administrator.sh user-cred-add atlassian ATLASSIAN_TOKEN ATLASSIAN_EMAIL
+# Rotate the same way — user-cred-add is idempotent (apply semantics)
+```
+
+Multiple secrets are supported — list them in order; later entries override earlier on env var conflict.
+List available vault credential names (you have read-only access):
+
+```bash
+./administrator.sh vault-ls shared           # platform creds available to all sessions
+./administrator.sh vault-ls users/jnesbitt   # your personal entries
+```
+
+The session pod namespace is `omp-session-<team>-<name>` (not `omp-session-<name>`).
+Team members have `pods/exec` and `pods/log` in that namespace — no secrets access.
+
+The LINK column is removed from `kubectl get sessions` output. Retrieve the join link
+explicitly:
+
+```bash
+kubectl get session my-session -n omp-team-<team> -o jsonpath='{.status.joinLink}'
+```
+
+Self-service stop/start/delete works identically to admin sessions — scoped to your
+team's namespace. You cannot touch sessions in another team's namespace.
+
+See [docs/access-control.md](../access-control.md) for the full access model.
+
 ## 1. Launch a session
 
 ```bash
@@ -28,7 +80,7 @@ metadata:
   name: work
   namespace: omp-system
 spec:
-  subtrees: ["services"]
+  subtrees: ["shared"]
   view: false
 EOF
 ```
@@ -125,7 +177,7 @@ metadata:
   name: work
   namespace: omp-system
 spec:
-  subtrees: ["services"]
+  subtrees: ["shared"]
   authBroker: true
 EOF
 
@@ -238,7 +290,7 @@ But guests are confined to that session's credentials.
 - **Collab link is empty.** The pod may have just restarted; trigger re-capture (above)
   and wait ~30 s. If still empty, exec into the session and check the omp pane directly.
 - **A var is missing / subtree exported nothing.** Check GSM labels:
-  `./administrator.sh vault-ls services`. An empty subtree → session launches without
+  `./administrator.sh vault-ls shared` (or `vault-ls users/<name>`). An empty subtree → session launches without
   those creds.
 - **A value isn't obfuscated.** The env-var name lacks a secret keyword — add a regex
   to `platform/secrets.yml` and re-run `./administrator.sh setup`.

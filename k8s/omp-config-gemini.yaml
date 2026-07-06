@@ -13,6 +13,10 @@ data:
       plan: google/gemini-3.1-pro-preview
       slow: google/gemini-1.5-pro
       smol: google/gemini-1.5-flash
+    providers:
+      tinyModel: lfm2-350m
+      memoryModel: qwen3-1.7b
+      autoThinkingModel: qwen3-1.7b
     todo:
       eager: always
     search:

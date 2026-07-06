@@ -27,9 +27,6 @@ spec:
         - name: NAMESPACE
           jsonPath: .status.namespace
           type: string
-        - name: LINK
-          jsonPath: .status.joinLink
-          type: string
       schema:
         openAPIV3Schema:
           type: object
@@ -41,8 +38,9 @@ spec:
                   type: array
                   items:
                     type: string
-                  default:
-                    - services
+                  description: >-
+                    Deprecated — use credentialSecrets instead. Retained for
+                    backward compatibility with existing sessions only.
                 view:
                   type: boolean
                   default: false
@@ -81,6 +79,30 @@ spec:
                     on localhost; omp uses it via OMP_AUTH_BROKER_URL.
                     Initial auth still requires one exec per provider; the broker
                     then handles automatic token refresh.
+                team:
+                  type: string
+                  pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                  description: >-
+                    Owning team slug. When set, the session namespace is
+                    omp-session-<team>-<name> and the operator grants group
+                    omp-team-<team>@<domain> exec/attach/log on the pod. The
+                    Session CR MUST be created in namespace omp-team-<team>. When
+                    unset (admin/shared sessions), namespace is omp-session-<name>
+                    with no team binding.
+                credentialSecrets:
+                  type: array
+                  items:
+                    type: string
+                    pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?/[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                  description: >-
+                    Personal credentials to inject into the session pod.
+                    Format: "<user>/<secret-name>" — the operator reads secret
+                    <secret-name> from namespace omp-user-<user>. Ownership is
+                    enforced at admission by the omp-credential-secrets-ownership
+                    ValidatingAdmissionPolicy: entries must carry the requesting
+                    user's own username prefix (platform admins and the operator
+                    are exempt). Later entries win on env var conflict. Example:
+                    ["jnesbitt/atlassian-token", "jnesbitt/ollama-key"]
             status:
               type: object
               properties:

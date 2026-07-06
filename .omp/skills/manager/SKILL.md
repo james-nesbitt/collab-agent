@@ -19,7 +19,8 @@ kubectl config current-context  # should be gke_<project>_<zone>_omp-cluster
 ```
 Or refresh: `./administrator.sh credentials`.
 
-Session CRs live in namespace `omp-system`. Session pods run in `omp-session-<name>`.
+Session CRs live in `omp-system` (admin) or `omp-team-<team>` (team sessions). Session pods
+run in `omp-session-<name>` (admin) or `omp-session-<team>-<name>` (team).
 
 ## Create a session
 
@@ -44,6 +45,37 @@ kubectl wait --for=jsonpath='{.status.phase}'=Hosting \
   session/work -n omp-system --timeout=180s
 ```
 
+
+**Team session** (requires `team-add <team>` by admin first):
+```yaml
+apiVersion: omp.mirantis.io/v1alpha1
+kind: Session
+metadata:
+  name: my-session
+  namespace: omp-team-<team>     # must match spec.team; CR is isolated to your namespace
+spec:
+  subtrees: ["shared"]           # platform vault creds (e.g. OLLAMA_CLOUD_API_KEY)
+  team: <team>
+  credentialSecrets:             # personal K8s Secrets — format: "<user>/<secret>"
+    - jnesbitt/atlassian         # operator reads from omp-user-jnesbitt namespace
+```
+Create/rotate personal creds (no admin needed):
+```bash
+# Admin runs once to create the user namespace:
+./administrator.sh user-add jnesbitt
+
+# User creates/rotates their own secret (values prompted hidden — safe from ps/history):
+./administrator.sh user-cred-add atlassian ATLASSIAN_TOKEN ATLASSIAN_EMAIL
+```
+List available vault credential names (never values):
+```bash
+./administrator.sh vault-ls shared           # platform creds
+./administrator.sh vault-ls users/jnesbitt   # your personal entries
+```
+The join link is NOT in `kubectl get sessions` output. Retrieve explicitly:
+```bash
+kubectl get session my-session -n omp-team-<team> -o jsonpath='{.status.joinLink}'
+```
 ## Command map
 
 | Intent | Command |
@@ -101,7 +133,8 @@ kubectl wait --for=jsonpath='{.status.phase}'=Hosting \
   ```bash
   printf '%s' "$MY_PAT" | ./administrator.sh auth work gh
   ```
-  Alternatively, store the PAT in GSM (`vault-add services/github/token`) and inject via `omp-creds`.
+  Alternatively, store the PAT as a user K8s Secret: `./administrator.sh github-user-cred` and
+  reference it as `credentialSecrets: ["jnesbitt/github-token"]`.
 
 - **If the browser-redirect OAuth can't open a browser in the pod** (e.g. `aws configure sso`):
   ```bash
@@ -151,6 +184,9 @@ kubectl wait --for=jsonpath='{.status.phase}'=Hosting \
   re-run `./administrator.sh setup`.
 - **Pod stuck / image pull error:** `kubectl describe pod omp -n omp-session-NAME` —
   check image tag and GHCR package visibility (must be public for anonymous pull).
+- **A var is missing / subtree exported nothing.** Check GSM labels:
+  `./administrator.sh vault-ls shared` (or `vault-ls users/<name>`). An empty subtree → session launches without
+  those creds.
 
 ## Session lifecycle notes
 

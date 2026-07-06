@@ -36,8 +36,10 @@ docs/             — architecture, role guides, planning
 
 ```bash
 ./administrator.sh setup
-printf '%s' "$GITHUB_TOKEN" | ./administrator.sh vault-add services/github/token
-./administrator.sh vault-ls          # confirm
+# Shared platform credentials (e.g. an Ollama Cloud key):
+./administrator.sh vault-add shared/ollama-cloud-api-key    # prompts interactively
+# Personal credentials are self-managed via user-add + user-cred-add (see administrator guide)
+./administrator.sh vault-ls shared   # confirm
 ```
 
 ### 2.5. Bootstrap model credentials (administrator, one-time)
@@ -61,7 +63,7 @@ metadata:
   name: work
   namespace: omp-system  # Session CRs can live in any namespace; omp-system or omp-sessions are conventional
 spec:
-  subtrees: ["services"]
+  subtrees: ["shared"]
   view: false
 EOF
 kubectl wait --for=jsonpath='{.status.phase}'=Hosting session/work -n omp-system --timeout=180s
@@ -69,6 +71,7 @@ kubectl wait --for=jsonpath='{.status.phase}'=Hosting session/work -n omp-system
 # and the join link is ready; complete Anthropic OAuth with:
 #   ./administrator.sh auth work anthropic   # device code — visit the URL in your browser
 # (token persists on the session PVC). Other providers: gcloud · aws · az · gh (PAT on stdin).
+# Tiny-model weights (session titles, memory) are baked into the image — no downloads needed.
 kubectl get session work -n omp-system -o jsonpath='{.status.joinLink}'  # prints join link
 ```
 
@@ -99,9 +102,12 @@ All defaults are overridable via env vars. Key ones:
 | `OMP_REGISTRY` | `ghcr.io/james-nesbitt/collab-agent` | Image registry |
 | `OMP_IMAGE_TAG` | `latest` | Image tag |
 | `ADMIN_GCP_ACCOUNT` | current gcloud account | Account granted cluster-admin |
+| `OMP_GROUP_DOMAIN` | `mirantis.com` | Workspace domain for RBAC groups |
 
 ## Roles
 
 - [Administrator guide](docs/roles/administrator.md)
 - [Manager guide](docs/roles/manager.md)
 - [Operator guide](docs/roles/operator.md)
+- [Access control](docs/access-control.md) — GCP IAM + Kubernetes RBAC + team onboarding
+  (requires `gke-security-groups@mirantis.com` + per-team Google Groups in Workspace)

@@ -78,8 +78,7 @@ One idempotent command does two things:
 2. Creates (or patches) the master `omp-config` ConfigMap in `omp-system` with:
    - Global secret obfuscation (`secrets.enabled: true`) so credential values are
      replaced with `#XXXX#` before any text reaches the model.
-   - `modelRoles`: default `claude-sonnet-4-6`, plan `claude-opus-4-8`, slow + smol
-     `claude-haiku-4-5`.
+   - `modelRoles`: default/plan `google/gemini-3.1-pro-preview`, slow `google/gemini-1.5-pro`, smol `google/gemini-1.5-flash`.
    - Portable agent tuning (editor/task defaults).
 
 You'll see `SETUP_OK`. Re-run any time you change `platform/` files or rotate config
@@ -95,46 +94,93 @@ Two extra capabilities are off by default:
 ./administrator.sh tune               # both
 ```
 
-`tune` patches the master `omp-config` ConfigMap. Running pods pick it up on next
-restart (`kubectl delete pod omp -n omp-session-NAME` to force it immediately).
-Both capabilities run on local ONNX models (`qwen3-1.7b`), CPU-only. Expect `TUNE_OK`.
+`tune` patches the master `omp-config` ConfigMap. Tiny-model weights (`lfm2-350m` ~212 MB for titles,
+`qwen3-1.7b` ~1.1 GB for memory/thinking) are baked into the session image and seeded to each session
+PVC on first pod start — no downloads at runtime. `setup`/`tune` update the master ConfigMap in
+`omp-system`; the operator re-syncs it (and copied secrets) into session namespaces on every reconcile
+— bump the `restartedAt` annotation to propagate + restart. Expect `TUNE_OK`.
 
-## 4. Store the credentials people will need
+## 4. Store credentials
 
-Credentials live in **GCP Secret Manager** under a subtree (default `services`). Add
-one by piping the value in on **stdin** — never as an argument, so it never lands in
-your shell history or the process list:
-
-```bash
-printf '%s' "$MY_GITHUB_TOKEN" | ./administrator.sh vault-add services/github/token
-```
-
-`vault-add` is idempotent: it creates the GSM secret if absent, then adds a new secret
-version. The path is stored with labels `omp_vault=true` and
-`omp_subtree=<subtree-slug>` so the operator can enumerate it. Check what's there
-(names only, never values):
+Credentials live in **GCP Secret Manager**, organised into subtrees. `vault-add`
+prompts for the value interactively (hidden — never echoed, never in shell history):
 
 ```bash
-./administrator.sh vault-ls           # all vault entries
-./administrator.sh vault-ls services  # one subtree
+./administrator.sh vault-add shared/ollama-cloud-api-key   # prompts for value
+./administrator.sh vault-add users/jnesbitt/atlassian-token
 ```
 
-**Naming matters.** The entry path becomes an environment variable name inside the
-session: `/` and `-` become `_`, uppercased, with the subtree prefix stripped. So
-`services/github/token` → `GITHUB_TOKEN`, which matches omp's `TOKEN` pattern and is
-auto-obfuscated. End an entry with a secret keyword (`token`, `key`, `secret`,
-`password`) so obfuscation fires. If you must use a name that doesn't match, add a
-value-shape regex to `platform/secrets.yml` and re-run `setup`.
+### Subtree conventions
 
-**The `mirantis-services` skill needs two entries:**
+| Subtree | Purpose | Who gets it |
+|---|---|---|
+| `shared/` | Platform-wide credentials all sessions may need (e.g. Ollama Cloud key) | Any session with `spec.subtrees: ["shared"]` |
+| `users/<name>/` | Personal credentials scoped to one user (Atlassian, GitHub PAT) | Only sessions that explicitly include `users/<name>` in `spec.subtrees` |
+
+The `services/` subtree is retired — it conflated platform and personal credentials.
+
+### Naming and env var derivation
+
+The vault path becomes an env var inside the session pod: the subtree prefix is
+stripped, `/` and `-` become `_`, uppercased. Examples:
+
+| Vault path | GSM secret | Env var |
+|---|---|---|
+| `shared/ollama-cloud-api-key` | `shared-ollama-cloud-api-key` | `OLLAMA_CLOUD_API_KEY` |
+| `users/jnesbitt/atlassian-token` | `users-jnesbitt-atlassian-token` | `ATLASSIAN_TOKEN` |
+| `users/jnesbitt/github-token` | `users-jnesbitt-github-token` | `GITHUB_TOKEN` |
+
+End entry names with a secret keyword (`token`, `key`, `secret`, `password`) so
+omp's value obfuscation fires. Check what's stored (names only, never values):
 
 ```bash
-printf '%s' "$ATLASSIAN_EMAIL" | ./administrator.sh vault-add services/atlassian/email
-printf '%s' "$ATLASSIAN_TOKEN" | ./administrator.sh vault-add services/atlassian/token
+./administrator.sh vault-ls               # all entries
+./administrator.sh vault-ls shared        # one subtree
+./administrator.sh vault-ls users/jnesbitt
 ```
 
-They inject as `ATLASSIAN_EMAIL` / `ATLASSIAN_TOKEN`. `token` auto-obfuscates; `email`
-is not a secret.
+### Injecting credentials into a session
+
+Sessions declare what they need via `spec.subtrees`. The operator builds an
+ExternalSecret; ESO syncs the values into `omp-creds` in the session namespace.
+Only `omp-creds` is auto-injected — nothing else is copied unless explicitly declared.
+
+```yaml
+spec:
+  subtrees: ["shared", "users/jnesbitt"]  # gets OLLAMA_CLOUD_API_KEY + ATLASSIAN_* + GITHUB_TOKEN
+```
+
+### GHCR image pull secret
+
+Keep the pull secret current whenever your GitHub token rotates (needs `read:packages` scope):
+
+```bash
+./administrator.sh github-pull-secret   # auto-detects username + token from gh CLI
+```
+
+Propagates automatically to all running session namespaces.
+
+## 4b. User credential namespaces
+
+For personal credentials that team members manage themselves without admin involvement:
+
+```bash
+./administrator.sh user-add <name>     # creates omp-user-<name> namespace + IAM
+./administrator.sh user-rm <name>      # removes namespace + IAM (prompts)
+```
+
+Once onboarded, the user creates their own K8s Secrets:
+
+```bash
+# Values prompted interactively (hidden) — never appear in process args or shell history
+./administrator.sh user-cred-add atlassian ATLASSIAN_TOKEN ATLASSIAN_EMAIL
+./administrator.sh user-cred-add github-token GITHUB_TOKEN   # or: github-user-cred
+./administrator.sh user-cred-ls                              # list names + keys, never values
+```
+
+Users reference secrets in Session CRs as `credentialSecrets: ["<name>/<secret>"]`.
+The operator resolves `omp-user-<name>` and copies the named Secret into the session pod
+namespace at provision time. No admin involvement needed for rotation.
 
 ## 5. Day to day
 
@@ -187,7 +233,41 @@ CLUSTER_NAME=omp-staging ZONE=us-central1-a ./administrator.sh provision
 | `ADMIN_GCP_ACCOUNT` | active gcloud account | `provision`, `bootstrap` |
 | `OMP_REGISTRY` | `ghcr.io/james-nesbitt/collab-agent` | `bootstrap` |
 | `OMP_IMAGE_TAG` | `latest` | `bootstrap` |
+| `OMP_GROUP_DOMAIN` | `mirantis.com` | `provision`, `bootstrap`, `team-add/rm` |
 | `SUBTREE` | `services` | `vault-add` default subtree |
+
+## Teams
+
+See [docs/access-control.md](../access-control.md) for the full model. Summary:
+
+### Prerequisite (Workspace admin)
+
+Create Google Groups in Workspace:
+- `gke-security-groups@mirantis.com` — required GKE umbrella; members are other groups
+- `omp-admins@mirantis.com` — admin group; member of `gke-security-groups@`
+- `omp-team-<team>@mirantis.com` — one per team; member of `gke-security-groups@`
+
+`provision` enables `--security-group=gke-security-groups@${OMP_GROUP_DOMAIN}` on the
+cluster (GKE Groups-for-RBAC). `bootstrap` adds the `omp-admins@` ClusterRoleBinding.
+Until the Workspace groups exist, all group RBAC bindings are inert — testable via
+`kubectl auth can-i --as-group=`.
+
+### Onboard a team
+
+```bash
+./administrator.sh team-add <team>    # idempotent
+```
+
+Creates namespace `omp-team-<team>`, a `sessions` CRUD Role+RoleBinding for
+`omp-team-<team>@mirantis.com`, and grants `roles/container.clusterViewer` IAM so
+members can `get-credentials`.
+
+### List and remove teams
+
+```bash
+./administrator.sh team-ls
+./administrator.sh team-rm <team>    # prompts; warns if session namespaces exist
+```
 
 ## What you don't do
 

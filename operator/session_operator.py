@@ -8,6 +8,7 @@ GSM is accessed for secret metadata only (list, never access_secret_version).
 Credentials arrive in pods via ESO → K8s Secret → envFrom.
 """
 
+import base64
 import logging
 import os
 import re
@@ -31,6 +32,7 @@ OMP_SESSION_IMAGE: str = os.environ.get(
 )
 OMP_GSM_PROJECT: str = os.environ.get("OMP_GSM_PROJECT", "")
 OMP_RELAY: str = os.environ.get("OMP_RELAY", "")
+OMP_GROUP_DOMAIN: str = os.environ.get("OMP_GROUP_DOMAIN", "mirantis.com")
 
 GROUP = "omp.mirantis.io"
 VERSION = "v1alpha1"
@@ -102,14 +104,44 @@ def list_gsm_secrets(project: str, subtree: str) -> list[dict]:
 # Kubernetes object builders
 # ---------------------------------------------------------------------------
 
-def _namespace(ns: str, session_name: str) -> k8s.V1Namespace:
+def _namespace(ns: str, session_name: str, team: str = "") -> k8s.V1Namespace:
+    labels: dict = {"omp.mirantis.io/session": session_name}
+    if team:
+        labels["omp.mirantis.io/team"] = team
     return k8s.V1Namespace(
-        metadata=k8s.V1ObjectMeta(
-            name=ns,
-            labels={"omp.mirantis.io/session": session_name},
-        )
+        metadata=k8s.V1ObjectMeta(name=ns, labels=labels)
     )
 
+
+def _team_role(ns: str) -> k8s.V1Role:
+    """Role granting a team exec/log access to pods in a session namespace (not secrets)."""
+    return k8s.V1Role(
+        metadata=k8s.V1ObjectMeta(name="omp-session-user", namespace=ns),
+        rules=[
+            k8s.V1PolicyRule(api_groups=[""], resources=["pods"], verbs=["get", "list", "watch"]),
+            k8s.V1PolicyRule(api_groups=[""], resources=["pods/exec"], verbs=["create"]),
+            k8s.V1PolicyRule(api_groups=[""], resources=["pods/log"], verbs=["get"]),
+        ],
+    )
+
+
+def _team_rolebinding(ns: str, team: str) -> k8s.V1RoleBinding:
+    """Bind the omp-session-user Role to the team's Google Group in a session namespace."""
+    return k8s.V1RoleBinding(
+        metadata=k8s.V1ObjectMeta(name="omp-session-user", namespace=ns),
+        role_ref=k8s.V1RoleRef(
+            api_group="rbac.authorization.k8s.io",
+            kind="Role",
+            name="omp-session-user",
+        ),
+        subjects=[
+            k8s.RbacV1Subject(
+                kind="Group",
+                api_group="rbac.authorization.k8s.io",
+                name=f"omp-team-{team}@{OMP_GROUP_DOMAIN}",
+            )
+        ],
+    )
 
 def _service_account(ns: str) -> k8s.V1ServiceAccount:
     # Not WI-annotated: session pods have no cloud identity.
@@ -239,7 +271,7 @@ def _network_policies(ns: str) -> list[dict]:
     ]
 
 
-def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_secret: bool = False, extra_env: dict | None = None, auth_broker: bool = False, broker_token: str = "") -> k8s.V1Pod:
+def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_secret: bool = False, extra_env: dict | None = None, auth_broker: bool = False, broker_token: str = "", user_creds_secrets: list | None = None) -> k8s.V1Pod:
     """
     Build the session pod manifest.
 
@@ -308,23 +340,32 @@ def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_s
                     name="omp",
                     image=image,
                     image_pull_policy="Always",
+                    resources=k8s.V1ResourceRequirements(
+                        requests={"cpu": "500m", "memory": "1Gi"},
+                        limits={"memory": "12Gi"},
+                    ),
                     env=env,
                     env_from=[
+                        # omp-bootstrap-env: platform bootstrap keys (lowest precedence)
+                        k8s.V1EnvFromSource(
+                            secret_ref=k8s.V1SecretEnvSource(name="omp-bootstrap-env", optional=True)
+                        ),
+                        # omp-creds: ESO-synced from spec.subtrees
                         k8s.V1EnvFromSource(
                             secret_ref=k8s.V1SecretEnvSource(
                                 name="omp-creds", optional=True
                             )
                         ),
-                        k8s.V1EnvFromSource(
-                            secret_ref=k8s.V1SecretEnvSource(
-                                name="omp-bootstrap-env", optional=True
+                        # credentialSecrets: user-managed personal creds (later entries
+                        # override earlier ones and omp-creds on conflict)
+                        *[
+                            k8s.V1EnvFromSource(
+                                secret_ref=k8s.V1SecretEnvSource(
+                                    name=s, optional=True
+                                )
                             )
-                        ),
-                        k8s.V1EnvFromSource(
-                            secret_ref=k8s.V1SecretEnvSource(
-                                name="anthropic-oauth", optional=True
-                            )
-                        ),
+                            for s in (user_creds_secrets or [])
+                        ],
                     ],
                     security_context=k8s.V1SecurityContext(
                         run_as_non_root=True,
@@ -341,6 +382,10 @@ def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_s
                         name="auth-broker",
                         image=image,
                         image_pull_policy="Always",
+                        resources=k8s.V1ResourceRequirements(
+                            requests={"cpu": "50m", "memory": "128Mi"},
+                            limits={"memory": "512Mi"},
+                        ),
                         command=["omp", "auth-broker", "serve",
                                  "--bind", "localhost:9999"],
                         env=[
@@ -402,7 +447,7 @@ def _apply_network_policy(ns: str, body: dict) -> None:
 
 
 def _copy_secret(v1: k8s.CoreV1Api, ns: str, secret_name: str, src_ns: str = "omp-system") -> bool:
-    """Copy a Secret from src_ns into ns. Returns True if copied/already present, False if absent."""
+    """Copy/refresh a Secret from src_ns into ns. True if present, False if source absent."""
     try:
         src = v1.read_namespaced_secret(secret_name, src_ns)
     except k8s.ApiException as exc:
@@ -414,7 +459,12 @@ def _copy_secret(v1: k8s.CoreV1Api, ns: str, secret_name: str, src_ns: str = "om
         type=src.type,
         data=src.data,
     )
-    _create_or_skip(v1.create_namespaced_secret, ns, dst)
+    try:
+        v1.create_namespaced_secret(ns, dst)
+    except k8s.ApiException as exc:
+        if exc.status != 409:
+            raise
+        v1.replace_namespaced_secret(secret_name, ns, dst)
     return True
 
 
@@ -430,14 +480,11 @@ def _ensure_broker_token_secret(v1: k8s.CoreV1Api, ns: str) -> str:
     secret_name = "auth-broker-token"
     try:
         secret = v1.read_namespaced_secret(secret_name, ns)
-        return (secret.data or {}).get("token", b"").decode() if isinstance(
-            (secret.data or {}).get("token", b""), bytes
-        ) else (secret.data or {}).get("token", "")
+        return base64.b64decode((secret.data or {}).get("token", "")).decode()
     except k8s.ApiException as exc:
         if exc.status != 404:
             raise
     # Generate and store a fresh token
-    import base64
     token = secrets.token_hex(32)
     secret = k8s.V1Secret(
         metadata=k8s.V1ObjectMeta(name=secret_name, namespace=ns),
@@ -601,47 +648,75 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
     8. Wait for Pod Ready
     9. Capture collab join link via pod exec, set status.phase=Hosting
     """
-    subtrees: list = list(spec.get("subtrees", ["services"]))
+    subtrees: list = list(spec.get("subtrees", []))
     view: bool = bool(spec.get("view", False))
     config_ref: str = spec.get("configRef", "omp-config")
     extra_env: dict = dict(spec.get("env", {}))
     auth_broker: bool = bool(spec.get("authBroker", False))
-    ns: str = f"omp-session-{name}"
+    team: str = spec.get("team", "")
+    credential_secrets: list = list(spec.get("credentialSecrets", []))
+    ns: str = f"omp-session-{team}-{name}" if team else f"omp-session-{name}"
+
+    # Guard: team sessions must live in their own CR namespace (prevents spoofing)
+    if team and namespace != f"omp-team-{team}":
+        _patch_cr_status(namespace, name, phase="Failed",
+                         message=f"spec.team '{team}' requires CR namespace omp-team-{team}")
+        return
 
     _patch_cr_status(namespace, name, phase="Provisioning")
 
     v1 = k8s.CoreV1Api()
 
     # 1. Namespace
-    _create_or_skip(v1.create_namespace, _namespace(ns, name))
+    _create_or_skip(v1.create_namespace, _namespace(ns, name, team))
     logger.info("Namespace %s ready", ns)
+
+    # 1b. Team RBAC: grant team group exec/log in session namespace (not secrets)
+    if team:
+        rbac = k8s.RbacAuthorizationV1Api()
+        _create_or_skip(rbac.create_namespaced_role, ns, _team_role(ns))
+        _create_or_skip(rbac.create_namespaced_role_binding, ns, _team_rolebinding(ns, team))
+        logger.info("Bound team %s to namespace %s (exec/log)", team, ns)
 
     # 2. ServiceAccount
     _create_or_skip(v1.create_namespaced_service_account, ns, _service_account(ns))
 
-    # 2b. Copy secrets from omp-system that are present (gracefully absent if not yet created)
+    # 2b. Copy ghcr-pull-secret from omp-system so pods can pull from GHCR.
     has_pull_secret = _copy_secret(v1, ns, "ghcr-pull-secret")
     if has_pull_secret:
         logger.info("Copied ghcr-pull-secret into %s", ns)
-    for secret_name in ("omp-bootstrap-env", "anthropic-oauth"):
-        if _copy_secret(v1, ns, secret_name):
-            logger.info("Copied %s into %s", secret_name, ns)
 
-    # 3. PVC
-    _create_or_skip(v1.create_namespaced_persistent_volume_claim, ns, _pvc(ns))
+    # 2b'. Platform bootstrap env (e.g. GEMINI_API_KEY) — lowest-precedence envFrom.
+    if _copy_secret(v1, ns, "omp-bootstrap-env"):
+        logger.info("Synced omp-bootstrap-env into %s", ns)
 
-    # 4. ExternalSecret — skip if no data entries (ESO rejects empty data/dataFrom)
-    es = _external_secret(ns, subtrees, OMP_GSM_PROJECT)
-    if not es["spec"]["data"]:
-        logger.warning("No GSM secrets matched subtrees %s for session %s; skipping ExternalSecret", subtrees, name)
-        patch.status["message"] = "no credentials matched subtrees"
-    else:
-        _apply_custom_object("external-secrets.io", "v1", ns, "externalsecrets", es)
+    # 2c. Copy personal credential secrets from omp-user-<user> namespaces.
+    # Ownership ("you may only reference your own <user>/ prefix") is enforced
+    # at admission by the omp-credential-secrets-ownership ValidatingAdmissionPolicy
+    # — the operator itself performs no requester-identity check.
+    copied_user_secrets: list[str] = []
+    for entry in credential_secrets:
+        if "/" not in entry:
+            logger.warning("credentialSecret '%s' has no user prefix (expected <user>/<secret>) — skipping", entry)
+            continue
+        cred_user, secret_name = entry.split("/", 1)
+        src_ns = f"omp-user-{cred_user}"
+        if _copy_secret(v1, ns, secret_name, src_ns=src_ns):
+            copied_user_secrets.append(secret_name)
+            logger.info("Copied credentialSecret '%s' from %s into %s", secret_name, src_ns, ns)
+        else:
+            logger.warning("credentialSecret '%s' not found in %s — skipping", secret_name, src_ns)
+
 
     cm = _configmap_from_master(ns, config_ref)
     has_cm = cm is not None
     if cm:
-        _create_or_skip(v1.create_namespaced_config_map, ns, cm)
+        try:
+            v1.create_namespaced_config_map(ns, cm)
+        except k8s.ApiException as exc:
+            if exc.status != 409:
+                raise
+            v1.replace_namespaced_config_map("omp-config", ns, cm)
 
     # 6. NetworkPolicies
     for np in _network_policies(ns):
@@ -681,7 +756,7 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
             broker_token = _ensure_broker_token_secret(v1, ns)
             patch.status["authBrokerUrl"] = "http://localhost:9999"
             logger.info("Auth-broker enabled for session %s (token stored in auth-broker-token secret)", name)
-        _create_or_skip(v1.create_namespaced_pod, ns, _pod(ns, name, desired_image, has_cm, has_pull_secret, extra_env, auth_broker=auth_broker, broker_token=broker_token))
+        _create_or_skip(v1.create_namespaced_pod, ns, _pod(ns, name, desired_image, has_cm, has_pull_secret, extra_env, auth_broker=auth_broker, broker_token=broker_token, user_creds_secrets=copied_user_secrets))
         created = True
         patch.status["restartedAt"] = restart_nonce or ""
 
@@ -729,15 +804,16 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
 # ---------------------------------------------------------------------------
 # Delete handler
 # ---------------------------------------------------------------------------
-
 @kopf.on.delete(GROUP, VERSION, PLURAL)
-def delete(name, patch, logger, **_) -> None:
+def delete(name, spec, status, patch, logger, **_) -> None:
     """
     Delete the session namespace.  All session resources (PVC, Secret,
     ExternalSecret, NetworkPolicies, Pod, ConfigMap, SA) cascade automatically
     because they live inside that namespace.
     """
-    ns = f"omp-session-{name}"
+    team: str = (spec or {}).get("team", "")
+    ns: str = ((status or {}).get("namespace")
+               or (f"omp-session-{team}-{name}" if team else f"omp-session-{name}"))
     patch.status["phase"] = "Terminating"
     v1 = k8s.CoreV1Api()
     try:
@@ -765,7 +841,8 @@ def on_recapture(spec, name, namespace, old, new, logger, **_) -> None:
     if new_val is None or new_val == old_val:
         return  # annotation absent or unchanged — not a recapture request
 
-    ns = f"omp-session-{name}"
+    team: str = spec.get("team", "")
+    ns = f"omp-session-{team}-{name}" if team else f"omp-session-{name}"
     view: bool = bool(spec.get("view", False))
     logger.info("Recapture requested for session %s", name)
 

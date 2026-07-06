@@ -17,6 +17,26 @@ if [[ ! -d "${WORK_DIR}/.omp" ]]; then
     cp -a /opt/omp/work-template/.omp "${WORK_DIR}/.omp"
 fi
 
+# Seed tiny-model weights from the image layer (one-time per session PVC).
+# Target must match omp's transformers.js env.cacheDir. Per-model copy only
+# if absent so runtime-refreshed files are never overwritten.
+if [[ -d /opt/omp/hf-cache ]]; then
+    HF_SEED_TARGET="${HOME}/.cache/huggingface/transformers"
+    for _org_dir in /opt/omp/hf-cache/*/; do
+        [[ -d "${_org_dir}" ]] || continue
+        _org="$(basename "${_org_dir}")"
+        for _model_dir in "${_org_dir}"*/; do
+            [[ -d "${_model_dir}" ]] || continue
+            _model="$(basename "${_model_dir}")"
+            if [[ ! -d "${HF_SEED_TARGET}/${_org}/${_model}" ]]; then
+                mkdir -p "${HF_SEED_TARGET}/${_org}"
+                cp -a "${_model_dir}" "${HF_SEED_TARGET}/${_org}/${_model}"
+            fi
+        done
+    done
+    unset _org_dir _org _model_dir _model HF_SEED_TARGET
+fi
+
 # Render session name placeholder
 sed -i "s/__SESSION_NAME__/${OMP_SESSION_NAME}/g" "${WORK_DIR}/.omp/AGENTS.md"
 

@@ -7,7 +7,7 @@ and how to wire up specific services.
 
 ## Architecture
 
-Three injection layers, applied in order (last wins for the same key):
+Four injection layers, applied in order (last wins for the same key):
 
 ```
 GSM vault  ──→  ESO  ──→  omp-creds (per-session K8s Secret)  ──→  pod envFrom
@@ -21,6 +21,7 @@ Session CR spec.env  ───────────────────�
 |---|---|---|---|
 | `omp-creds` | per-session, per-subtree | GSM + ESO | ESO re-syncs hourly; immediate on session restart |
 | `omp-bootstrap-env` | all sessions | kubectl (omp-system) | patch secret; restart session pod |
+| `credentialSecrets` | per-session, per-user | user (kubectl/user-cred-add) | user rotates; restart pod |
 | `spec.env` | single session | Session CR | patch CR; restart pod |
 
 Global obfuscation (`secrets.enabled: true` in omp-config) replaces every matched
@@ -35,38 +36,45 @@ need a value-shape regex in `platform/secrets.yml`.
 Three viable approaches for sessions shared across operators with different
 credential identities.
 
-### Approach A — Named subtrees per operator (recommended)
+### Approach A — User credential namespaces (recommended)
 
-Each operator owns a subtree in GSM. Sessions are created with the relevant
-subtrees requested. Credentials are scoped at provisioning time; a session never
-sees another operator's subtree.
+Each user owns an `omp-user-<name>` namespace. Secrets are created there by the user
+(no admin involvement after initial `user-add`). Sessions reference them by name;
+the operator copies them into the session pod namespace at provision time.
 
 ```bash
-# Administrator: add Alice's GitHub token under her subtree
-printf '%s' "$ALICE_TOKEN" | ./administrator.sh vault-add operators/alice/github/token
+# Administrator: onboard the user once
+./administrator.sh user-add alice
 
-# Manager: launch a session for Alice with her subtree
+# Alice: create her own secrets (values hidden, never in process args or history)
+./administrator.sh user-cred-add atlassian ATLASSIAN_TOKEN ATLASSIAN_EMAIL
+./administrator.sh user-cred-add github-token GITHUB_TOKEN   # or: github-user-cred
+
+# Manager: launch a session for Alice
 kubectl apply -f - <<EOF
 apiVersion: omp.mirantis.io/v1alpha1
 kind: Session
 metadata:
   name: alice-work
-  namespace: omp-system
+  namespace: omp-team-alice
 spec:
-  subtrees: ["services", "operators/alice"]
-  view: false
+  subtrees: ["shared"]
+  team: alice
+  credentialSecrets:
+    - alice/atlassian
+    - alice/github-token
 EOF
 ```
 
-Alice's session gets `GITHUB_TOKEN` from her subtree; she never sees Bob's entry.
+Alice's session gets `ATLASSIAN_TOKEN`, `ATLASSIAN_EMAIL`, and `GITHUB_TOKEN` from her
+naming namespace; she never sees another user's secrets.
 
-**Post-session rotation:** `./administrator.sh vault-add operators/alice/github/token`
-(new version in GSM). ESO re-syncs within the hour. For immediate pickup: restart
-the pod (`kubectl delete pod omp -n omp-session-alice-work`).
+**Rotation:** Alice runs `user-cred-add` again (idempotent). Restart the pod to pick up
+the new values (operator does not re-copy on reconcile — only at provision time).
 
-**Tradeoffs:** clean GSM audit trail, IAM-governed, per-secret ESO `secretAccessor`
-binding (added by `vault-add`). Requires a session per operator. No runtime
-credential swap without a pod restart.
+**Tradeoffs:** K8s-native, no GSM required for personal creds, user self-service,
+no admin round-trip for rotation. Provision-time copy only — live rotation requires
+a pod restart.
 
 ---
 
@@ -151,15 +159,14 @@ shared platform credentials — use the bootstrap env for those.
 
 | Env var | Source | vault entry |
 |---|---|---|
-| `ATLASSIAN_EMAIL` | GSM `services` subtree | `services/atlassian/email` |
-| `ATLASSIAN_TOKEN` | GSM `services` subtree | `services/atlassian/token` |
+| `ATLASSIAN_EMAIL` | user K8s Secret | `user-cred-add atlassian ATLASSIAN_EMAIL` |
+| `ATLASSIAN_TOKEN` | user K8s Secret | `user-cred-add atlassian ATLASSIAN_TOKEN` |
 
 ```bash
-printf '%s' "$EMAIL" | ./administrator.sh vault-add services/atlassian/email
-printf '%s' "$TOKEN" | ./administrator.sh vault-add services/atlassian/token
+./administrator.sh user-cred-add atlassian ATLASSIAN_TOKEN ATLASSIAN_EMAIL
 ```
 
-Sessions launched with `subtrees: ["services"]` inject both vars. See the
+Reference `credentialSecrets: ["<name>/atlassian"]` in the Session CR. See the
 `mirantis-services` skill for usage patterns. `ATLASSIAN_TOKEN` auto-obfuscates
 (`TOKEN` suffix); `ATLASSIAN_EMAIL` does not (add a regex to `platform/secrets.yml`
 if the value shape needs masking).
@@ -174,7 +181,9 @@ if the value shape needs masking).
 | `GH_TOKEN` | `gh` CLI (alternative) | use one, not both |
 
 ```bash
-printf '%s' "$GITHUB_TOKEN" | ./administrator.sh vault-add services/github/token
+./administrator.sh github-user-cred          # creates github-token secret in omp-user-<name>
+# or manually:
+./administrator.sh user-cred-add github-token GITHUB_TOKEN
 ```
 
 The `gh` CLI picks up `GITHUB_TOKEN` or `GH_TOKEN` automatically — no `gh auth
@@ -214,7 +223,7 @@ a service account key file instead:
 
 ```bash
 # Store the JSON key in GSM
-printf '%s' "$(cat sa-key.json)" | ./administrator.sh vault-add services/gcp/sa-key
+printf '%s' "$(cat sa-key.json)" | ./administrator.sh vault-add shared/gcp/sa-key
 
 # In the session: GOOGLE_APPLICATION_CREDENTIALS must point to a file, not an env var value.
 # Write it to disk (once, persists on PVC):
@@ -232,14 +241,14 @@ obfuscation (JSON content does not match the default keyword patterns).
 
 | Env var | vault entry | Notes |
 |---|---|---|
-| `AWS_ACCESS_KEY_ID` | `services/aws/access-key-id` | auto-obfuscated (`KEY` suffix) |
-| `AWS_SECRET_ACCESS_KEY` | `services/aws/secret-access-key` | auto-obfuscated (`KEY` suffix) |
+| `AWS_ACCESS_KEY_ID` | `shared/aws/access-key-id` | auto-obfuscated (`KEY` suffix) |
+| `AWS_SECRET_ACCESS_KEY` | `shared/aws/secret-access-key` | auto-obfuscated (`KEY` suffix) |
 | `AWS_SESSION_TOKEN` | runtime injection (Approach C) | short-lived; rotate via runtime patch |
-| `AWS_DEFAULT_REGION` | `services/aws/default-region` | not sensitive; safe to put in bootstrap-env |
+| `AWS_DEFAULT_REGION` | `shared/aws/default-region` | not sensitive; safe to put in bootstrap-env |
 
 ```bash
-printf '%s' "$AWS_KEY_ID"     | ./administrator.sh vault-add services/aws/access-key-id
-printf '%s' "$AWS_SECRET_KEY" | ./administrator.sh vault-add services/aws/secret-access-key
+printf '%s' "$AWS_KEY_ID"     | ./administrator.sh vault-add shared/aws/access-key-id
+printf '%s' "$AWS_SECRET_KEY" | ./administrator.sh vault-add shared/aws/secret-access-key
 ```
 
 The AWS CLI and SDKs pick up all three vars automatically. For assumed-role /
@@ -256,9 +265,9 @@ patch) to rotate it without killing the session.
 | Interactive device code | — | `az login`; token persists on PVC |
 
 ```bash
-printf '%s' "$CLIENT_ID"     | ./administrator.sh vault-add services/azure/client-id
-printf '%s' "$CLIENT_SECRET" | ./administrator.sh vault-add services/azure/client-secret
-printf '%s' "$TENANT_ID"     | ./administrator.sh vault-add services/azure/tenant-id
+printf '%s' "$CLIENT_ID"     | ./administrator.sh vault-add shared/azure/client-id
+printf '%s' "$CLIENT_SECRET" | ./administrator.sh vault-add shared/azure/client-secret
+printf '%s' "$TENANT_ID"     | ./administrator.sh vault-add shared/azure/tenant-id
 ```
 
 With all three vars injected, `az login --service-principal` is implicit — the
