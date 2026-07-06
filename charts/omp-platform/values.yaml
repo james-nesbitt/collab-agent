@@ -1,0 +1,24 @@
+# GCP and cluster identity
+project: ""
+zone: ""
+clusterName: ""
+adminAccount: ""
+groupDomain: "mirantis.com"
+
+# Image settings
+registry: "ghcr.io/james-nesbitt/collab-agent"
+sessionImageTag: "latest"
+operatorImageTag: "latest"
+relay: ""
+
+# GCP Service Accounts (filled in by Terraform helm_release values)
+esoServiceAccount: ""
+operatorServiceAccount: ""
+
+# omp-config tuning flags (appended to base config.yml)
+config:
+  memory: false
+  thinking: false
+
+# Teams to onboard (creates omp-team-<slug> namespace + ClusterSecretStore access)
+teams: []

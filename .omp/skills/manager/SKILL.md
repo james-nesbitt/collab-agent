@@ -54,19 +54,10 @@ metadata:
   name: my-session
   namespace: omp-team-<team>     # must match spec.team; CR is isolated to your namespace
 spec:
-  subtrees: ["shared"]           # platform vault creds (e.g. OLLAMA_CLOUD_API_KEY)
+  subtrees: ["shared", "users/jnesbitt"]  # platform creds + personal GSM entries
   team: <team>
-  credentialSecrets:             # personal K8s Secrets — format: "<user>/<secret>"
-    - jnesbitt/atlassian         # operator reads from omp-user-jnesbitt namespace
 ```
-Create/rotate personal creds (no admin needed):
-```bash
-# Admin runs once to create the user namespace:
-./administrator.sh user-add jnesbitt
-
-# User creates/rotates their own secret (values prompted hidden — safe from ps/history):
-./administrator.sh user-cred-add atlassian ATLASSIAN_TOKEN ATLASSIAN_EMAIL
-```
+_Personal credentials are managed via `ompctl cred add` — see `ompctl --help`._
 List available vault credential names (never values):
 ```bash
 ./administrator.sh vault-ls shared           # platform creds
@@ -133,8 +124,7 @@ kubectl get session my-session -n omp-team-<team> -o jsonpath='{.status.joinLink
   ```bash
   printf '%s' "$MY_PAT" | ./administrator.sh auth work gh
   ```
-  Alternatively, store the PAT as a user K8s Secret: `./administrator.sh github-user-cred` and
-  reference it as `credentialSecrets: ["jnesbitt/github-token"]`.
+  _Personal credentials are managed via `ompctl cred add` — see `ompctl --help`._
 
 - **If the browser-redirect OAuth can't open a browser in the pod** (e.g. `aws configure sso`):
   ```bash

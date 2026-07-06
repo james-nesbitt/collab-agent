@@ -271,145 +271,124 @@ def _network_policies(ns: str) -> list[dict]:
     ]
 
 
-def _pod(ns: str, session_name: str, image: str, has_configmap: bool, has_pull_secret: bool = False, extra_env: dict | None = None, auth_broker: bool = False, broker_token: str = "", user_creds_secrets: list | None = None) -> k8s.V1Pod:
-    """
-    Build the session pod manifest.
-
-    securityContext mirrors the documented rootless-docker-in-pod recipe:
-    - runAsNonRoot + uid/gid 1000 (the 'omp' user in the image)
-    - allowPrivilegeEscalation=true so setuid newuidmap/newgidmap work
-    - seccompProfile Unconfined (rootless engines need user-namespace syscalls)
-    - capabilities.drop ALL, no added caps, not privileged
-    - fsGroup 1000 so the PVC is owned by the omp user on mount
-
-    An emptyDir at /home/omp/.docker-run keeps the rootless-dockerd runtime
-    directory off the PVC (prevents stale socket paths across node reschedules).
-    """
-    env = [k8s.V1EnvVar(name="OMP_SESSION_NAME", value=session_name)]
+def _statefulset(ns: str, session_name: str, image: str, has_configmap: bool,
+                 extra_env: dict | None = None, auth_broker: bool = False,
+                 broker_token: str = "") -> dict:
+    """Build a StatefulSet manifest (replicas=1) for a session pod."""
+    env: list = [{"name": "OMP_SESSION_NAME", "value": session_name}]
     if OMP_RELAY:
-        env.append(k8s.V1EnvVar(name="COLLAB_RELAY", value=OMP_RELAY))
+        env.append({"name": "COLLAB_RELAY", "value": OMP_RELAY})
     for k, v in (extra_env or {}).items():
-        env.append(k8s.V1EnvVar(name=k, value=v))
+        env.append({"name": k, "value": v})
     if auth_broker and broker_token:
-        env.append(k8s.V1EnvVar(name="OMP_AUTH_BROKER_URL", value="http://localhost:9999"))
-        env.append(k8s.V1EnvVar(name="OMP_AUTH_BROKER_TOKEN", value=broker_token))
+        env.append({"name": "OMP_AUTH_BROKER_URL", "value": "http://localhost:9999"})
+        env.append({"name": "OMP_AUTH_BROKER_TOKEN", "value": broker_token})
 
-    volume_mounts = [
-        k8s.V1VolumeMount(name="omp-home", mount_path="/home/omp"),
-        k8s.V1VolumeMount(name="docker-run", mount_path="/home/omp/.docker-run"),
+    volume_mounts: list = [
+        {"name": "omp-home", "mountPath": "/home/omp"},
+        {"name": "docker-run", "mountPath": "/home/omp/.docker-run"},
     ]
-    volumes: list[k8s.V1Volume] = [
-        k8s.V1Volume(
-            name="omp-home",
-            persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(
-                claim_name="omp-home"
-            ),
-        ),
-        k8s.V1Volume(name="docker-run", empty_dir=k8s.V1EmptyDirVolumeSource()),
+    volumes: list = [
+        {"name": "docker-run", "emptyDir": {}},
     ]
 
     if has_configmap:
-        volume_mounts.append(
-            k8s.V1VolumeMount(name="omp-config", mount_path="/etc/omp", read_only=True)
-        )
-        volumes.append(
-            k8s.V1Volume(
-                name="omp-config",
-                config_map=k8s.V1ConfigMapVolumeSource(name="omp-config"),
-            )
-        )
+        volume_mounts.append({"name": "omp-config", "mountPath": "/etc/omp", "readOnly": True})
+        volumes.append({"name": "omp-config", "configMap": {"name": "omp-config"}})
 
-    image_pull_secrets = (
-        [k8s.V1LocalObjectReference(name="ghcr-pull-secret")] if has_pull_secret else None
-    )
-    return k8s.V1Pod(
-        metadata=k8s.V1ObjectMeta(name="omp", namespace=ns),
-        spec=k8s.V1PodSpec(
-            service_account_name="omp-session",
-            restart_policy="Always",
-            image_pull_secrets=image_pull_secrets,
-            security_context=k8s.V1PodSecurityContext(
-                run_as_non_root=True,
-                run_as_user=1000,
-                run_as_group=1000,
-                fs_group=1000,
-                seccomp_profile=k8s.V1SeccompProfile(type="Unconfined"),
-            ),
-            containers=[
-                k8s.V1Container(
-                    name="omp",
-                    image=image,
-                    image_pull_policy="Always",
-                    resources=k8s.V1ResourceRequirements(
-                        requests={"cpu": "500m", "memory": "1Gi"},
-                        limits={"memory": "12Gi"},
-                    ),
-                    env=env,
-                    env_from=[
-                        # omp-bootstrap-env: platform bootstrap keys (lowest precedence)
-                        k8s.V1EnvFromSource(
-                            secret_ref=k8s.V1SecretEnvSource(name="omp-bootstrap-env", optional=True)
-                        ),
-                        # omp-creds: ESO-synced from spec.subtrees
-                        k8s.V1EnvFromSource(
-                            secret_ref=k8s.V1SecretEnvSource(
-                                name="omp-creds", optional=True
-                            )
-                        ),
-                        # credentialSecrets: user-managed personal creds (later entries
-                        # override earlier ones and omp-creds on conflict)
-                        *[
-                            k8s.V1EnvFromSource(
-                                secret_ref=k8s.V1SecretEnvSource(
-                                    name=s, optional=True
-                                )
-                            )
-                            for s in (user_creds_secrets or [])
-                        ],
-                    ],
-                    security_context=k8s.V1SecurityContext(
-                        run_as_non_root=True,
-                        run_as_user=1000,
-                        run_as_group=1000,
-                        allow_privilege_escalation=True,
-                        seccomp_profile=k8s.V1SeccompProfile(type="Unconfined"),
-                        capabilities=k8s.V1Capabilities(drop=["ALL"]),
-                    ),
-                    volume_mounts=volume_mounts,
-                ),
-                *([
-                    k8s.V1Container(
-                        name="auth-broker",
-                        image=image,
-                        image_pull_policy="Always",
-                        resources=k8s.V1ResourceRequirements(
-                            requests={"cpu": "50m", "memory": "128Mi"},
-                            limits={"memory": "512Mi"},
-                        ),
-                        command=["omp", "auth-broker", "serve",
-                                 "--bind", "localhost:9999"],
-                        env=[
-                            k8s.V1EnvVar(name="OMP_AUTH_BROKER_TOKEN", value=broker_token),
-                        ],
-                        security_context=k8s.V1SecurityContext(
-                            run_as_non_root=True,
-                            run_as_user=1000,
-                            run_as_group=1000,
-                            allow_privilege_escalation=False,
-                            seccomp_profile=k8s.V1SeccompProfile(type="Unconfined"),
-                            capabilities=k8s.V1Capabilities(drop=["ALL"]),
-                        ),
-                        # Shares $HOME (PVC) with the main container so the broker's
-                        # SQLite credential DB is on the same persistent volume.
-                        volume_mounts=[
-                            k8s.V1VolumeMount(name="omp-home", mount_path="/home/omp"),
-                        ],
-                    )
-                ] if auth_broker and broker_token else []),
+    containers: list = [
+        {
+            "name": "omp",
+            "image": image,
+            "imagePullPolicy": "Always",
+            "resources": {
+                "requests": {"cpu": "500m", "memory": "1Gi"},
+                "limits": {"memory": "12Gi"},
+            },
+            "env": env,
+            "envFrom": [{"secretRef": {"name": "omp-creds", "optional": True}}],
+            "securityContext": {
+                "runAsNonRoot": True,
+                "runAsUser": 1000,
+                "runAsGroup": 1000,
+                "allowPrivilegeEscalation": True,
+                "seccompProfile": {"type": "Unconfined"},
+                "capabilities": {"drop": ["ALL"]},
+            },
+            "volumeMounts": volume_mounts,
+        },
+    ]
+    if auth_broker and broker_token:
+        containers.append({
+            "name": "auth-broker",
+            "image": image,
+            "imagePullPolicy": "Always",
+            "resources": {
+                "requests": {"cpu": "50m", "memory": "128Mi"},
+                "limits": {"memory": "512Mi"},
+            },
+            "command": ["omp", "auth-broker", "serve", "--bind", "localhost:9999"],
+            "env": [{"name": "OMP_AUTH_BROKER_TOKEN", "value": broker_token}],
+            "securityContext": {
+                "runAsNonRoot": True,
+                "runAsUser": 1000,
+                "runAsGroup": 1000,
+                "allowPrivilegeEscalation": False,
+                "seccompProfile": {"type": "Unconfined"},
+                "capabilities": {"drop": ["ALL"]},
+            },
+            # Shares $HOME (PVC) with the main container so the broker's
+            # SQLite credential DB is on the same persistent volume.
+            "volumeMounts": [{"name": "omp-home", "mountPath": "/home/omp"}],
+        })
+
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": {"name": "omp", "namespace": ns},
+        "spec": {
+            "serviceName": "omp",
+            "replicas": 1,
+            "selector": {"matchLabels": {"app": "omp", "session": session_name}},
+            "template": {
+                "metadata": {"labels": {"app": "omp", "session": session_name}},
+                "spec": {
+                    "serviceAccountName": "omp-session",
+                    "securityContext": {
+                        "runAsNonRoot": True,
+                        "runAsUser": 1000,
+                        "runAsGroup": 1000,
+                        "fsGroup": 1000,
+                        "seccompProfile": {"type": "Unconfined"},
+                    },
+                    "containers": containers,
+                    "volumes": volumes,
+                },
+            },
+            "volumeClaimTemplates": [
+                {
+                    "metadata": {"name": "omp-home"},
+                    "spec": {
+                        "accessModes": ["ReadWriteOnce"],
+                        "resources": {"requests": {"storage": "50Gi"}},
+                    },
+                }
             ],
-            volumes=volumes,
-        ),
-    )
+        },
+    }
+
+
+def _headless_service(ns: str) -> dict:
+    """Headless Service for the StatefulSet — enables stable DNS for omp-0."""
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {"name": "omp", "namespace": ns},
+        "spec": {
+            "clusterIP": "None",
+            "selector": {"app": "omp"},
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -446,26 +425,37 @@ def _apply_network_policy(ns: str, body: dict) -> None:
             raise
 
 
-def _copy_secret(v1: k8s.CoreV1Api, ns: str, secret_name: str, src_ns: str = "omp-system") -> bool:
-    """Copy/refresh a Secret from src_ns into ns. True if present, False if source absent."""
+
+
+def _apply_statefulset(ns: str, body: dict) -> None:
+    """Create or replace the StatefulSet in ns."""
+    apps = k8s.AppsV1Api()
     try:
-        src = v1.read_namespaced_secret(secret_name, src_ns)
-    except k8s.ApiException as exc:
-        if exc.status == 404:
-            return False
-        raise
-    dst = k8s.V1Secret(
-        metadata=k8s.V1ObjectMeta(name=secret_name, namespace=ns),
-        type=src.type,
-        data=src.data,
-    )
-    try:
-        v1.create_namespaced_secret(ns, dst)
+        apps.create_namespaced_stateful_set(ns, body)
     except k8s.ApiException as exc:
         if exc.status != 409:
             raise
-        v1.replace_namespaced_secret(secret_name, ns, dst)
-    return True
+        apps.replace_namespaced_stateful_set("omp", ns, body)
+
+
+def _apply_service(ns: str, body: dict) -> None:
+    """Create the headless Service in ns; ignore AlreadyExists."""
+    v1 = k8s.CoreV1Api()
+    try:
+        v1.create_namespaced_service(ns, body)
+    except k8s.ApiException as exc:
+        if exc.status != 409:
+            raise
+
+
+def _delete_statefulset(ns: str) -> None:
+    """Delete StatefulSet 'omp' in ns; ignore 404. PVC survives (volumeClaimTemplate lifecycle)."""
+    apps = k8s.AppsV1Api()
+    try:
+        apps.delete_namespaced_stateful_set("omp", ns)
+    except k8s.ApiException as exc:
+        if exc.status != 404:
+            raise
 
 
 def _ensure_broker_token_secret(v1: k8s.CoreV1Api, ns: str) -> str:
@@ -499,22 +489,22 @@ def _ensure_broker_token_secret(v1: k8s.CoreV1Api, ns: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _delete_pod(ns: str) -> None:
-    """Delete pod 'omp' in ns; ignore 404."""
+    """Delete pod 'omp-0' in ns; ignore 404."""
     v1 = k8s.CoreV1Api()
     try:
-        v1.delete_namespaced_pod("omp", ns)
+        v1.delete_namespaced_pod("omp-0", ns)
     except k8s.ApiException as exc:
         if exc.status != 404:
             raise
 
 
 def _wait_pod_gone(ns: str, timeout: int = 120) -> bool:
-    """Poll until pod 'omp' in ns is fully deleted (404), or timeout. Returns True if gone."""
+    """Poll until pod 'omp-0' in ns is fully deleted (404), or timeout. Returns True if gone."""
     v1 = k8s.CoreV1Api()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            v1.read_namespaced_pod("omp", ns)
+            v1.read_namespaced_pod("omp-0", ns)
         except k8s.ApiException as exc:
             if exc.status == 404:
                 return True
@@ -523,10 +513,10 @@ def _wait_pod_gone(ns: str, timeout: int = 120) -> bool:
 
 
 def _pod_image(ns: str) -> str | None:
-    """Return the image of pod 'omp' in ns, or None if the pod is absent."""
+    """Return the image of pod 'omp-0' in ns, or None if the pod is absent."""
     v1 = k8s.CoreV1Api()
     try:
-        pod = v1.read_namespaced_pod("omp", ns)
+        pod = v1.read_namespaced_pod("omp-0", ns)
         return pod.spec.containers[0].image
     except k8s.ApiException as exc:
         if exc.status == 404:
@@ -539,12 +529,12 @@ def _pod_image(ns: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 def _wait_pod_ready(ns: str, timeout: int = 300) -> bool:
-    """Poll until pod 'omp' in ns has condition Ready=True, or timeout expires."""
+    """Poll until pod 'omp-0' in ns has condition Ready=True, or timeout expires."""
     v1 = k8s.CoreV1Api()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            pod = v1.read_namespaced_pod("omp", ns)
+            pod = v1.read_namespaced_pod("omp-0", ns)
             conditions = (pod.status or k8s.V1PodStatus()).conditions or []
             if any(c.type == "Ready" and c.status == "True" for c in conditions):
                 return True
@@ -558,7 +548,7 @@ def _wait_pod_ready(ns: str, timeout: int = 300) -> bool:
 # Join-link capture
 # ---------------------------------------------------------------------------
 
-def _capture_join_link(ns: str, view: bool = False) -> str | None:
+def _tmux_capture_join_link(ns: str, view: bool = False) -> str | None:
     """
     Exec into the running omp pod and capture the collab join link.
 
@@ -582,7 +572,7 @@ def _capture_join_link(ns: str, view: bool = False) -> str | None:
     try:
         output: str = kubernetes.stream.stream(
             v1.connect_get_namespaced_pod_exec,
-            "omp",
+            "omp-0",
             ns,
             command=["sh", "-c", shell],
             stdout=True,
@@ -596,6 +586,44 @@ def _capture_join_link(ns: str, view: bool = False) -> str | None:
     except Exception as exc:  # noqa: BLE001
         log.warning("capture_join_link failed in namespace %s: %s", ns, exc)
     return None
+
+
+def _read_join_link_file(ns: str, view: bool = False) -> str | None:
+    """
+    Read the collab link from ~/.omp/collab-link.json in the session pod.
+    omp writes this file on hosting-start; the operator reads it once the
+    pod is Ready. More reliable than tmux pane scraping (Option C, plan 2026-07-06).
+    Retries up to max_attempts times with 5s sleep between attempts.
+    Falls back to tmux capture if the file is absent after all attempts.
+    """
+    v1 = k8s.CoreV1Api()
+    field = "viewLink" if view else "joinLink"
+    max_attempts = 6  # 6 × 5s = 30s max wait before falling back
+    for attempt in range(max_attempts):
+        try:
+            resp: str = kubernetes.stream.stream(
+                v1.connect_get_namespaced_pod_exec,
+                "omp-0",
+                ns,
+                command=["cat", "/home/omp/.omp/collab-link.json"],
+                stderr=True, stdin=False, stdout=True, tty=False,
+            )
+            import json as _json  # noqa: PLC0415
+            data = _json.loads(resp)
+            link = data.get(field) or data.get("joinLink")
+            if link:
+                return link
+        except Exception:  # noqa: BLE001
+            pass
+        if attempt < max_attempts - 1:
+            time.sleep(5)
+
+    # Fallback: tmux pane capture (kept for compatibility if omp version lacks file output)
+    log.warning(
+        "collab-link.json not found in omp-0/%s after %d attempts; falling back to tmux scrape",
+        ns, max_attempts,
+    )
+    return _tmux_capture_join_link(ns, view)
 
 
 # ---------------------------------------------------------------------------
@@ -654,7 +682,6 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
     extra_env: dict = dict(spec.get("env", {}))
     auth_broker: bool = bool(spec.get("authBroker", False))
     team: str = spec.get("team", "")
-    credential_secrets: list = list(spec.get("credentialSecrets", []))
     ns: str = f"omp-session-{team}-{name}" if team else f"omp-session-{name}"
 
     # Guard: team sessions must live in their own CR namespace (prevents spoofing)
@@ -681,32 +708,6 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
     # 2. ServiceAccount
     _create_or_skip(v1.create_namespaced_service_account, ns, _service_account(ns))
 
-    # 2b. Copy ghcr-pull-secret from omp-system so pods can pull from GHCR.
-    has_pull_secret = _copy_secret(v1, ns, "ghcr-pull-secret")
-    if has_pull_secret:
-        logger.info("Copied ghcr-pull-secret into %s", ns)
-
-    # 2b'. Platform bootstrap env (e.g. GEMINI_API_KEY) — lowest-precedence envFrom.
-    if _copy_secret(v1, ns, "omp-bootstrap-env"):
-        logger.info("Synced omp-bootstrap-env into %s", ns)
-
-    # 2c. Copy personal credential secrets from omp-user-<user> namespaces.
-    # Ownership ("you may only reference your own <user>/ prefix") is enforced
-    # at admission by the omp-credential-secrets-ownership ValidatingAdmissionPolicy
-    # — the operator itself performs no requester-identity check.
-    copied_user_secrets: list[str] = []
-    for entry in credential_secrets:
-        if "/" not in entry:
-            logger.warning("credentialSecret '%s' has no user prefix (expected <user>/<secret>) — skipping", entry)
-            continue
-        cred_user, secret_name = entry.split("/", 1)
-        src_ns = f"omp-user-{cred_user}"
-        if _copy_secret(v1, ns, secret_name, src_ns=src_ns):
-            copied_user_secrets.append(secret_name)
-            logger.info("Copied credentialSecret '%s' from %s into %s", secret_name, src_ns, ns)
-        else:
-            logger.warning("credentialSecret '%s' not found in %s — skipping", secret_name, src_ns)
-
 
     cm = _configmap_from_master(ns, config_ref)
     has_cm = cm is not None
@@ -729,13 +730,18 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
     applied_nonce = (status or {}).get("restartedAt")
 
     if desired_state == "stopped":
-        _delete_pod(ns)
+        apps = k8s.AppsV1Api()
+        try:
+            apps.patch_namespaced_stateful_set("omp", ns, {"spec": {"replicas": 0}})
+        except k8s.ApiException as exc:
+            if exc.status != 404:
+                raise
         patch.status["phase"] = "Stopped"
         patch.status["namespace"] = ns
         patch.status["podName"] = ""
         patch.status["joinLink"] = ""
         patch.status["viewLink"] = ""
-        logger.info("Session %s stopped (pod removed; namespace + PVC retained)", name)
+        logger.info("Session %s stopped (StatefulSet scaled to 0; namespace + PVC retained)", name)
         return
 
     current_image = _pod_image(ns)
@@ -744,25 +750,20 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
     )
     created = False
     if current_image is None or must_recreate:
-        if current_image is not None:
-            _delete_pod(ns)
-            if not _wait_pod_gone(ns, timeout=120):
-                logger.warning("Old pod in %s did not terminate in 120s; aborting recreate", ns)
-                patch.status["message"] = "pod recreate stalled: old pod still terminating"
-                return
         # 2c. Auth-broker token secret (idempotent; generates only on first call)
         broker_token = ""
         if auth_broker:
             broker_token = _ensure_broker_token_secret(v1, ns)
             patch.status["authBrokerUrl"] = "http://localhost:9999"
             logger.info("Auth-broker enabled for session %s (token stored in auth-broker-token secret)", name)
-        _create_or_skip(v1.create_namespaced_pod, ns, _pod(ns, name, desired_image, has_cm, has_pull_secret, extra_env, auth_broker=auth_broker, broker_token=broker_token, user_creds_secrets=copied_user_secrets))
+        _apply_service(ns, _headless_service(ns))
+        _apply_statefulset(ns, _statefulset(ns, name, desired_image, has_cm, extra_env, auth_broker=auth_broker, broker_token=broker_token))
         created = True
         patch.status["restartedAt"] = restart_nonce or ""
 
     patch.status["phase"] = "Running"
     patch.status["namespace"] = ns
-    patch.status["podName"] = "omp"
+    patch.status["podName"] = "omp-0"
     logger.info("Pod converged in %s (image=%s, recreated=%s)", ns, desired_image, created)
 
     # 8. Wait for pod Ready
@@ -776,27 +777,27 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
         # Pod is current and link already captured — nothing to do
         return
 
-    link = _capture_join_link(ns, view=view)
+    link = _read_join_link_file(ns, view=view)
     if not link:
         logger.info("Join link not found on first attempt; retrying in 15s")
         time.sleep(15)
-        link = _capture_join_link(ns, view=view)
+        link = _read_join_link_file(ns, view=view)
 
     if link:
         patch.status["joinLink"] = link
         patch.status["phase"] = "Hosting"
         patch.status["namespace"] = ns
-        patch.status["podName"] = "omp"
+        patch.status["podName"] = "omp-0"
         logger.info("Session %s hosting: %s", name, link)
         # Capture read-only view link too (when session is not already view-only)
         if not view:
-            view_link = _capture_join_link(ns, view=True)
+            view_link = _read_join_link_file(ns, view=True)
             if view_link:
                 patch.status["viewLink"] = view_link
     else:
         patch.status["phase"] = "Running"
         patch.status["namespace"] = ns
-        patch.status["podName"] = "omp"
+        patch.status["podName"] = "omp-0"
         patch.status["message"] = "Join link unavailable; session running without collab link"
         logger.warning("Could not capture join link for session %s", name)
 
@@ -846,18 +847,18 @@ def on_recapture(spec, name, namespace, old, new, logger, **_) -> None:
     view: bool = bool(spec.get("view", False))
     logger.info("Recapture requested for session %s", name)
 
-    link = _capture_join_link(ns, view=view)
+    link = _read_join_link_file(ns, view=view)
     if not link:
         logger.info("Link not found on first attempt; retrying in 15s")
         time.sleep(15)
-        link = _capture_join_link(ns, view=view)
+        link = _read_join_link_file(ns, view=view)
 
     if link:
         _patch_cr_status(namespace, name, phase="Hosting", joinLink=link,
-                         namespace=ns, podName="omp")
+                         namespace=ns, podName="omp-0")
         logger.info("Recaptured join link for session %s", name)
         if not view:
-            view_link = _capture_join_link(ns, view=True)
+            view_link = _read_join_link_file(ns, view=True)
             if view_link:
                 _patch_cr_status(namespace, name, viewLink=view_link)
     else:

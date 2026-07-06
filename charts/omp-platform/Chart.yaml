@@ -1,0 +1,6 @@
+apiVersion: v2
+name: omp-platform
+description: omp session operator platform — CRD, RBAC, operator, ESO secret store, and config.
+type: application
+version: 0.1.0
+appVersion: "latest"

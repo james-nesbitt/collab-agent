@@ -37,10 +37,6 @@ Full reference: read `docs/roles/administrator.md`.
 | Onboard a team (idempotent) | `./administrator.sh team-add <team>` |
 | List teams and bound groups | `./administrator.sh team-ls` |
 | Remove a team | `./administrator.sh team-rm <team>` (prompts; warns if sessions exist) |
-| Onboard a user (personal cred namespace) | `./administrator.sh user-add <name>` |
-| Remove a user | `./administrator.sh user-rm <name>` (prompts) |
-| Add/update a personal K8s Secret (hidden prompts) | `./administrator.sh user-cred-add <secret> <KEY> [<KEY2>...] [--user <name>]` |
-| List personal K8s Secret names + keys | `./administrator.sh user-cred-ls [--user <name>]` |
 
 `provision`, `bootstrap`, `credentials`, and `setup` are idempotent.
 
@@ -70,20 +66,15 @@ Full reference: read `docs/roles/administrator.md`.
   in `gke-security-groups@<domain>`, adds members; (2) `./administrator.sh team-add <team>`.
   Creates `omp-team-<team>` namespace + Role (sessions CRUD + secrets CRUD) +
   `clusterViewer` IAM (kubectl access) + `secretmanager.viewer` IAM (vault-ls).
-  Team members self-manage personal credential Secrets in their namespace and reference
-  them via `spec.credentialSecrets` in Session CRs — no admin involvement for rotation.
+  Team members add personal credentials to GSM via `ompctl cred add` and request them
+  via `subtrees: ["users/<name>"]` in Session CRs — no admin involvement for rotation.
   `provision` enables `--security-group` on the cluster (GKE Groups-for-RBAC);
   `bootstrap` adds `omp-admins@<domain>` ClusterRoleBinding. Override the domain:
   `OMP_GROUP_DOMAIN=example.com ./administrator.sh team-add myteam`.
   See [access-control.md](skill://administrator/../../docs/access-control.md).
 
-- **Onboard a user (personal creds):** `user-add <name>` creates `omp-user-<name>`, grants
-  that user secrets CRUD in that namespace and `secretmanager.viewer` IAM (vault-ls).
-  Users then self-manage K8s Secrets with `user-cred-add` and reference them in Session CRs
-  as `credentialSecrets: ["<name>/<secret>"]`. Values are prompted hidden, base64-encoded
-  in Python, and piped to `kubectl apply` — never appear in process args or shell history.
-  `github-user-cred [<name>]` creates the `github-token` secret from `gh auth token`.
-  `user-rm <name>` removes the namespace and IAM binding.
+- **Personal credentials:** users add their own credentials to GSM via `ompctl cred add`
+  and request them via `subtrees: ["users/<name>"]` in Session CRs. See `ompctl --help`.
 
 - **Enable local-model features:** `tune --memory` and/or `--thinking`; no flag = both.
   Patches the omp-config ConfigMap; running pods pick it up on next restart.
@@ -151,3 +142,56 @@ through `vault-add`.
 - Images come from GHCR CI; this role never builds or pushes images.
 - Never echo a credential value — `vault-add` reads from stdin only.
 - These scripts never push or open PRs; follow the repo git rules for any commits.
+
+## ompctl (self-service and session CLI)
+
+`ompctl` is a Python CLI for operations that are genuinely imperative (credentials,
+session lifecycle, auth flows). It requires `GCP_PROJECT` to be set; vault/cred commands
+that grant ESO access also need `OMP_ESO_SA`.
+
+### Credential management
+
+| Command | Purpose |
+| --- | --- |
+| `ompctl cred add <key>` | Add a personal credential to GSM (`users/<you>/<key>`) — prompts for value |
+| `ompctl cred ls` | List your personal credentials in GSM |
+| `ompctl vault add <entry>` | Admin: add a `shared/` or `users/` credential to GSM |
+| `ompctl vault ls [<subtree>]` | List vault entry names (never values) |
+
+Example — add a personal Atlassian token:
+
+```bash
+GCP_PROJECT=tools-348616 ompctl cred add atlassian-token
+# prompts: Enter value for users/jnesbitt/atlassian-token (hidden):
+```
+
+Then request it in a Session CR: `subtrees: ["users/jnesbitt"]`.
+
+### Session lifecycle
+
+| Command | Purpose |
+| --- | --- |
+| `ompctl session stop <name>` | Scale session StatefulSet to 0 replicas (PVC retained) |
+| `ompctl session start <name>` | Resume a stopped session (scale to 1) |
+| `ompctl session restart <name>` | Force pod re-creation via annotation bump |
+| `ompctl session link <name>` | Print current join/view links from Session CR status |
+
+### Auth and port-forward
+
+| Command | Purpose |
+| --- | --- |
+| `ompctl auth <session> <provider>` | Interactive auth inside pod (providers: `anthropic` `gcloud` `aws` `aws-configure` `az` `gh`) |
+| `ompctl port-forward <session> <port>` | Forward session pod port to localhost |
+
+Example — gcloud ADC inside a running session:
+
+```bash
+GCP_PROJECT=tools-348616 ompctl auth work gcloud
+# Opens device-code URL; token lands on the session PVC
+
+GCP_PROJECT=tools-348616 ompctl port-forward work 8080
+# Forwards pod port 8080 → localhost:8080 for browser-redirect OAuth flows
+```
+
+Required env vars: `GCP_PROJECT=<project-id>`. For vault/cred commands that configure
+ESO access: `OMP_ESO_SA=<omp-eso-sa-email>`.

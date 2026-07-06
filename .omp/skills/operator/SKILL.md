@@ -57,3 +57,21 @@ control agents.
 
 For how sharing, encryption, and credential isolation work end to end, see
 `docs/architecture.md`.
+
+## Session pod naming (Option C / StatefulSet)
+
+When the platform is running Option C (StatefulSet sessions), the session pod is named
+**`omp-0`** (StatefulSet ordinal), not `omp`. This affects any `kubectl exec` or
+`kubectl logs` command targeting the session pod directly:
+
+```bash
+# StatefulSet pod name
+kubectl exec -it -n omp-session-NAME omp-0 -- bash
+kubectl logs -n omp-session-NAME omp-0
+
+# (Legacy bare-pod name — pre-Option-C)
+# kubectl exec -it -n omp-session-NAME omp -- bash
+```
+
+As a joiner this is transparent — you connect via the collab link regardless. It matters
+only if an admin or manager needs to exec directly into the pod for debugging.
