@@ -767,8 +767,10 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
     # 7. State-aware pod convergence
     desired_state = spec.get("state", "running")
     desired_image = spec.get("image") or OMP_SESSION_IMAGE
-    restart_nonce = (annotations or {}).get("omp.mirantis.io/restartedAt")
-    applied_nonce = (status or {}).get("restartedAt")
+    # Normalize to "" so absent annotation (None), empty status, and "" all compare
+    # equal — a fresh reconcile must not recreate a pod whose image already matches.
+    restart_nonce = (annotations or {}).get("omp.mirantis.io/restartedAt") or ""
+    applied_nonce = (status or {}).get("restartedAt") or ""
 
     if desired_state == "stopped":
         apps = k8s.AppsV1Api()
@@ -815,7 +817,8 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
 
     # 9. Capture join link only when pod was (re)created or link is missing
     if not created and (status or {}).get("joinLink"):
-        # Pod is current and link already captured — nothing to do
+        # Pod is current and link already captured — keep Hosting; do not downgrade to Running.
+        patch.status["phase"] = "Hosting"
         return
 
     link = _read_join_link_file(ns, view=view)
