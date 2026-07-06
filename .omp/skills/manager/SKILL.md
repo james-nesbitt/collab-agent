@@ -78,16 +78,16 @@ kubectl get session my-session -n omp-team-<team> -o jsonpath='{.status.joinLink
 | Start a stopped session | `kubectl patch session NAME -n omp-system --type=merge -p '{"spec":{"state":"running"}}'` |
 | Restart (always moves to latest image) | `kubectl patch session NAME -n omp-system --type=merge -p "{\"spec\":{\"image\":null},\"metadata\":{\"annotations\":{\"omp.mirantis.io/restartedAt\":\"$(date +%s)\"}}}"` |
 | Move to a pinned image | `kubectl patch session NAME -n omp-system --type=merge -p '{"spec":{"image":"ghcr.io/james-nesbitt/collab-agent/omp-session:sha-XXXX"}}'` |
-| Auth a provider in a session | `./administrator.sh auth NAME PROVIDER` — providers: `anthropic` `gcloud` `aws` `az` `gh` |
-| Port-forward for browser OAuth | `./administrator.sh port-forward NAME LOCAL_PORT` |
+| Auth a provider in a session | `ompctl auth NAME PROVIDER` — providers: `anthropic` `gcloud` `aws` `az` `gh` |
+| Port-forward for browser OAuth | `ompctl port-forward NAME LOCAL_PORT` |
 | Transfer local session to GKE pod | `./administrator.sh session-transfer NAME [LOCAL_DIR] [SESSION_ID]` |
-| Skip setup wizard in tmux | `kubectl exec -n omp-session-NAME omp -- bash -lc 'tmux send-keys -t omp Escape Escape Escape'` |
-| Attach to session tmux | `kubectl exec -it -n omp-session-NAME omp -- tmux attach -t omp` |
+| Skip setup wizard in tmux | `kubectl exec -n omp-session-NAME omp-0 -- bash -lc 'tmux send-keys -t omp Escape Escape Escape'` |
+| Attach to session tmux | `kubectl exec -it -n omp-session-NAME omp-0 -- tmux attach -t omp` |
 | Get collab join link | `kubectl get session NAME -n omp-system -o jsonpath='{.status.joinLink}'` |
 | Get view-only link | `kubectl get session NAME -n omp-system -o jsonpath='{.status.viewLink}'` |
 | Trigger link re-capture | `kubectl annotate session NAME -n omp-system omp.mirantis.io/recapture=$(date +%s) --overwrite` |
 | Inspect session events | `kubectl describe session NAME -n omp-system` |
-| Check pod logs | `kubectl logs -n omp-session-NAME omp` |
+| Check pod logs | `kubectl logs -n omp-session-NAME omp-0` |
 | Check operator logs | `kubectl logs -n omp-system deploy/omp-operator` |
 
 ## Workflows
@@ -101,37 +101,37 @@ kubectl get session my-session -n omp-team-<team> -o jsonpath='{.status.joinLink
   1. Apply Session CR; wait for `Running`.
   2. Authenticate Anthropic (device code — visit URL in your browser):
      ```bash
-     ./administrator.sh auth work anthropic
+     ompctl auth work anthropic
      ```
      Token saves to PVC; survives restarts. One-time per session.
   3. Dismiss setup wizard if omp is waiting:
      ```bash
-     kubectl exec -n omp-session-work omp -- bash -lc 'tmux send-keys -t omp Escape Escape Escape'
+     kubectl exec -n omp-session-work omp-0 -- bash -lc 'tmux send-keys -t omp Escape Escape Escape'
      ```
   4. Trigger collab link capture and hand to operators.
 
 - **Authenticate a cloud CLI (gcloud / aws / az):**
   ```bash
-  ./administrator.sh auth work gcloud      # device code → gcloud ADC on PVC
-  ./administrator.sh auth work aws         # device code SSO login (profile must exist)
-  ./administrator.sh auth work aws-configure  # interactive SSO wizard (browser redirect)
-  ./administrator.sh auth work az          # device code → Azure token on PVC
+  ompctl auth work gcloud      # device code → gcloud ADC on PVC
+  ompctl auth work aws         # device code SSO login (profile must exist)
+  ompctl auth work aws-configure  # interactive SSO wizard (browser redirect)
+  ompctl auth work az          # device code → Azure token on PVC
   ```
   Credentials are stored under `$HOME` on the session PVC and survive pod restarts.
   Re-auth only needed when the token expires (gcloud/az: never for refresh; aws SSO: per portal policy ~8–12 h).
 
 - **Authenticate GitHub (paste token):**
   ```bash
-  printf '%s' "$MY_PAT" | ./administrator.sh auth work gh
+  printf '%s' "$MY_PAT" | ompctl auth work gh
   ```
   _Personal credentials are managed via `ompctl cred add` — see `ompctl --help`._
 
 - **If the browser-redirect OAuth can't open a browser in the pod** (e.g. `aws configure sso`):
   ```bash
   # Terminal 1
-  ./administrator.sh port-forward work 8400
+  ompctl port-forward work 8400
   # Terminal 2
-  kubectl exec -it -n omp-session-work omp -- bash -lc \
+  kubectl exec -it -n omp-session-work omp-0 -- bash -lc \
     'aws configure sso --redirect-url http://localhost:8400/callback'
   ```
 
@@ -159,7 +159,7 @@ kubectl get session my-session -n omp-team-<team> -o jsonpath='{.status.joinLink
 
 - **Check what auth is active:**
   ```bash
-  kubectl exec -n omp-session-NAME omp -- bash -lc '
+  kubectl exec -n omp-session-NAME omp-0 -- bash -lc '
     echo "GEMINI_API_KEY set: $([ -n "$GEMINI_API_KEY" ] && echo yes || echo no)"
     echo "ANTHROPIC_OAUTH_TOKEN set: $([ -n "$ANTHROPIC_OAUTH_TOKEN" ] && echo yes || echo no)"
     echo "ANTHROPIC_REFRESH_TOKEN set: $([ -n "$ANTHROPIC_REFRESH_TOKEN" ] && echo yes || echo no)"
@@ -171,8 +171,8 @@ kubectl get session my-session -n omp-team-<team> -o jsonpath='{.status.joinLink
 - **Session stuck in Pending/Provisioning:** `kubectl describe session NAME -n omp-system`
   — check operator logs for ExternalSecret or pod errors.
 - **ExternalSecret not Valid:** GSM labels mismatch or ClusterSecretStore not ready —
-  re-run `./administrator.sh setup`.
-- **Pod stuck / image pull error:** `kubectl describe pod omp -n omp-session-NAME` —
+  re-run `terraform apply` (from `infra/`) or manually apply `k8s/clustersecretstore.yaml`.
+- **Pod stuck / image pull error:** `kubectl describe pod omp-0 -n omp-session-NAME` —
   check image tag and GHCR package visibility (must be public for anonymous pull).
 - **A var is missing / subtree exported nothing.** Check GSM labels:
   `./administrator.sh vault-ls shared` (or `vault-ls users/<name>`). An empty subtree → session launches without
@@ -212,8 +212,8 @@ spec:
 EOF
 
 # Initial auth into the sidecar (exec into the auth-broker container)
-./administrator.sh auth work anthropic auth-broker
-./administrator.sh auth work gcloud    auth-broker
+ompctl auth work anthropic auth-broker
+ompctl auth work gcloud    auth-broker
 
 # After initial auth: broker auto-refreshes; no further action needed.
 ```

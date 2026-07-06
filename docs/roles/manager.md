@@ -2,10 +2,10 @@
 
 You are the **manager**. You create and share the sessions people work in. You assume
 the [administrator](administrator.md) has already provisioned the GKE cluster, run
-`bootstrap` and `setup`, and stored the necessary credentials with `vault-add`.
+`terraform apply`, and stored the necessary credentials with `vault-add`.
 
-You manage sessions directly with **`kubectl`** — there is no manager script. All
-platform config and vault operations use `./administrator.sh`.
+You manage sessions directly with **`kubectl`** — there is no manager script.
+Platform config via Terraform; vault operations via `./administrator.sh vault-add/vault-ls`; pod auth via `ompctl`.
 
 ## Before you start
 
@@ -30,21 +30,17 @@ metadata:
   name: my-session
   namespace: omp-team-<team>     # must match spec.team
 spec:
-  subtrees: ["shared"]            # platform creds (OLLAMA_CLOUD_API_KEY etc.)
+  subtrees: ["shared", "users/jnesbitt"]  # platform creds + personal creds via GSM
   team: <team>                    # operator creates omp-session-<team>-my-session
-  credentialSecrets:              # personal creds — format: "<user>/<secret>"
-    - jnesbitt/atlassian          # operator reads from omp-user-jnesbitt namespace
 ```
 
-Create your personal credential secret:
+Add personal credentials to GSM first:
 
 ```bash
-# Admin creates the user namespace once:
-./administrator.sh user-add jnesbitt
-
-# User manages their own secret (values prompted hidden):
-./administrator.sh user-cred-add atlassian ATLASSIAN_TOKEN ATLASSIAN_EMAIL
-# Rotate the same way — user-cred-add is idempotent (apply semantics)
+# Add personal credentials to GSM (value prompted hidden):
+GCP_PROJECT=tools-348616 ompctl cred add atlassian-token
+GCP_PROJECT=tools-348616 ompctl cred add atlassian-email
+# Then reference in Session CR: spec.subtrees: ["users/jnesbitt"]
 ```
 
 Multiple secrets are supported — list them in order; later entries override earlier on env var conflict.
@@ -86,8 +82,8 @@ EOF
 ```
 
 This applies a `Session` CR to the namespace specified in the manifest. The operator
-provisions an isolated namespace (`omp-session-work`), syncs the `services` subtree from
-GSM into a per-namespace Secret, and launches an `omp` pod.
+provisions an isolated namespace (`omp-session-work`), syncs the requested subtrees from
+GSM into a per-namespace Secret, and launches an `omp-0` StatefulSet pod.
 
 > **Namespace choice:** The Session CR can live in any namespace — `omp-system` and
 > `omp-sessions` are both conventional choices. Pick one and use it consistently across
@@ -120,24 +116,24 @@ Session credentials arrive in two ways:
 
 - **Interactive OAuth / SSO flows** (Anthropic, gcloud personal ADC, AWS SSO, Azure
   personal account): require a one-time device-code or browser-based login _inside_
-  the pod. Use `./administrator.sh auth`:
+  the pod. Use `ompctl auth`:
 
 ```bash
 # Anthropic — device code (visit the printed URL in your browser)
-./administrator.sh auth work anthropic
+ompctl auth work anthropic
 
 # GCP personal ADC — device code
-./administrator.sh auth work gcloud
+ompctl auth work gcloud
 
 # AWS SSO — device code (requires an SSO profile; configure first if needed)
-./administrator.sh auth work aws-configure   # one-time SSO profile wizard
-./administrator.sh auth work aws             # subsequent logins
+ompctl auth work aws-configure   # one-time SSO profile wizard
+ompctl auth work aws             # subsequent logins
 
 # Azure personal account — device code
-./administrator.sh auth work az
+ompctl auth work az
 
 # GitHub — paste a PAT on stdin (non-interactive)
-printf '%s' "$MY_GITHUB_PAT" | ./administrator.sh auth work gh
+printf '%s' "$MY_GITHUB_PAT" | ompctl auth work gh
 ```
 
 All credentials land under `$HOME` on the PVC and survive pod restarts. You only need
@@ -156,9 +152,9 @@ helper so the redirect lands on your laptop's browser:
 
 ```bash
 # Terminal 1 — forward pod port to localhost
-./administrator.sh port-forward work 8400
+ompctl port-forward work 8400
 # Terminal 2 — run the wizard pointing at the forwarded port
-kubectl exec -it -n omp-session-work omp -- bash -lc \
+kubectl exec -it -n omp-session-work omp-0 -- bash -lc \
   'aws configure sso --redirect-url http://localhost:8400/callback'
 ```
 
@@ -182,8 +178,8 @@ spec:
 EOF
 
 # Initial auth (exec into the auth-broker container, not the omp container)
-./administrator.sh auth work anthropic auth-broker
-./administrator.sh auth work gcloud    auth-broker
+ompctl auth work anthropic auth-broker
+ompctl auth work gcloud    auth-broker
 ```
 
 After initial auth, the broker auto-refreshes tokens. Credentials survive pod restarts
@@ -203,7 +199,9 @@ This prints the join link. Hand `omp join "<link>"` to your operators
 kubectl get session work -n <namespace> -o jsonpath='{.status.viewLink}'
 ```
 
-If the link is empty (e.g. a pod just restarted), trigger a re-capture and wait ~30 s:
+If the link is empty (e.g. a pod just restarted), trigger a re-capture and wait ~30 s.
+The operator reads the join link from `~/.omp/collab-link.json` on the pod — omp must
+be running and have completed hosting start:
 
 ```bash
 kubectl annotate session work -n <namespace> \
@@ -214,7 +212,7 @@ kubectl annotate session work -n <namespace> \
 
 ```bash
 # Attach to the session tmux (take the keyboard yourself)
-kubectl exec -it -n omp-session-work omp -- tmux attach -t omp
+kubectl exec -it -n omp-session-work omp-0 -- tmux attach -t omp
 
 # List all sessions
 kubectl get sessions -A
@@ -285,15 +283,15 @@ But guests are confined to that session's credentials.
   `kubectl logs -n omp-system deploy/omp-operator`. Common causes: the `omp-creds`
   ExternalSecret is not Valid (only applicable when `spec.subtrees` is non-empty; with
   empty subtrees the ExternalSecret is skipped entirely — GSM labels mismatch or ESO
-  ClusterSecretStore not ready → re-run `./administrator.sh setup`), or the pod failed
-  to start (image pull error — `kubectl describe pod omp -n omp-session-NAME`).
+  ClusterSecretStore not ready → re-run `terraform apply` (from `infra/`) or manually apply `k8s/clustersecretstore.yaml`), or the pod failed
+  to start (image pull error — `kubectl describe pod omp-0 -n omp-session-NAME`).
 - **Collab link is empty.** The pod may have just restarted; trigger re-capture (above)
   and wait ~30 s. If still empty, exec into the session and check the omp pane directly.
 - **A var is missing / subtree exported nothing.** Check GSM labels:
   `./administrator.sh vault-ls shared` (or `vault-ls users/<name>`). An empty subtree → session launches without
   those creds.
 - **A value isn't obfuscated.** The env-var name lacks a secret keyword — add a regex
-  to `platform/secrets.yml` and re-run `./administrator.sh setup`.
+  to `platform/secrets.yml` and re-run `terraform apply` (from `infra/`) to pick up the updated ConfigMap.
 - **Config change not picked up.** Use the restart annotation instead of deleting the
   pod directly:
   `kubectl annotate session NAME -n omp-system omp.mirantis.io/restartedAt=$(date +%s) --overwrite`
