@@ -151,6 +151,17 @@ modelRoles:
   plan: google/gemini-3.1-pro-preview
   slow: google/gemini-1.5-pro
   smol: google/gemini-1.5-flash
+providers:
+  # Local ONNX tiny-models for background tasks. Weights are downloaded from
+  # HuggingFace on first use and cached on the session PVC (~/.cache/huggingface/).
+  # All models run on CPU (q4 quantised); subsequent warm loads are sub-3s.
+  #
+  # tinyModel: session title generation (~212 MB, best speed/quality at sub-1B)
+  tinyModel: lfm2-350m
+  # memoryModel: Mnemopi extraction + consolidation (1.1 GB; best extraction precision)
+  memoryModel: qwen3-1.7b
+  # autoThinkingModel: auto-thinking difficulty classifier (reuses the memory model)
+  autoThinkingModel: qwen3-1.7b
 todo:
   eager: always
 search:
