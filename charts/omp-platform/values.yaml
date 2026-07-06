@@ -7,8 +7,15 @@ groupDomain: "mirantis.com"
 
 # Image settings
 registry: "ghcr.io/james-nesbitt/collab-agent"
+# sessionImageTag: omp-session image tag. NOTE: the 2026-07-06 daily-rebuild omp
+# binary has a fatal `getSuggestions` regression ("K7 is not a function") that
+# crashes the process on slash-command entry (e.g. /collab) and the startup
+# Escape auto-dismiss — pin an earlier known-good build via
+# infra/terraform.tfvars `session_image_tag` (verified good: 2026-06-29 build).
 sessionImageTag: "latest"
 operatorImageTag: "latest"
+# relay: COLLAB_RELAY for session pods. Empty = omp uses its built-in default
+# relay (verified working for /collab). Set only to override with a private relay.
 relay: ""
 
 # GCP Service Accounts (filled in by Terraform helm_release values)
