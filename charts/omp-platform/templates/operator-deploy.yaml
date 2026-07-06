@@ -22,7 +22,7 @@ spec:
           imagePullPolicy: Always
           env:
             - name: OMP_SESSION_IMAGE
-              value: "{{ .Values.registry }}/omp:{{ .Values.sessionImageTag }}"
+              value: "{{ .Values.registry }}/omp-session:{{ .Values.sessionImageTag }}"
             - name: OMP_GSM_PROJECT
               value: "{{ .Values.project }}"
             - name: OMP_RELAY

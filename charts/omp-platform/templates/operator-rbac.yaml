@@ -20,7 +20,11 @@ rules:
     resources: ["namespaces"]
     verbs: ["create", "delete", "get", "list", "watch"]
   - apiGroups: [""]
-    resources: ["pods", "pods/exec", "persistentvolumeclaims", "configmaps", "serviceaccounts"]
+    resources: ["pods", "pods/exec", "persistentvolumeclaims", "configmaps", "serviceaccounts", "services"]
+    verbs: ["create", "get", "list", "watch", "delete", "update", "patch"]
+  # StatefulSets: operator manages session pods via a StatefulSet (Option C)
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
     verbs: ["create", "get", "list", "watch", "delete", "update", "patch"]
   # Secrets: cluster-wide (creates auth-broker-token in session namespaces).
   # list/watch deliberately omitted; no reads of omp-system or omp-user-* namespaces.

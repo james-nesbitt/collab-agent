@@ -272,8 +272,8 @@ def _network_policies(ns: str) -> list[dict]:
 
 
 def _statefulset(ns: str, session_name: str, image: str, has_configmap: bool,
-                 extra_env: dict | None = None, auth_broker: bool = False,
-                 broker_token: str = "") -> dict:
+                 has_pull_secret: bool = False, extra_env: dict | None = None,
+                 auth_broker: bool = False, broker_token: str = "") -> dict:
     """Build a StatefulSet manifest (replicas=1) for a session pod."""
     env: list = [{"name": "OMP_SESSION_NAME", "value": session_name}]
     if OMP_RELAY:
@@ -354,6 +354,7 @@ def _statefulset(ns: str, session_name: str, image: str, has_configmap: bool,
                 "metadata": {"labels": {"app": "omp", "session": session_name}},
                 "spec": {
                     "serviceAccountName": "omp-session",
+                    **({"imagePullSecrets": [{"name": "ghcr-pull-secret"}]} if has_pull_secret else {}),
                     "securityContext": {
                         "runAsNonRoot": True,
                         "runAsUser": 1000,
@@ -407,27 +408,47 @@ def _create_or_skip(fn, *args) -> None:
 def _apply_custom_object(
     group: str, version: str, namespace: str, plural: str, body: dict
 ) -> None:
-    """Server-side apply a namespaced custom object (upsert, drift-safe)."""
+    """Create a namespaced custom object; ignore AlreadyExists."""
     custom = k8s.CustomObjectsApi()
-    custom.patch_namespaced_custom_object(
-        group, version, namespace, plural, body["metadata"]["name"], body,
-        field_manager="omp-operator",
-        force=True,
-        _content_type="application/apply-patch+yaml",
-    )
+    try:
+        custom.create_namespaced_custom_object(group, version, namespace, plural, body)
+    except k8s.ApiException as exc:
+        if exc.status != 409:
+            raise
 
 
 def _apply_network_policy(ns: str, body: dict) -> None:
-    """Server-side apply a NetworkPolicy (upsert, drift-safe)."""
     net = k8s.NetworkingV1Api()
-    net.patch_namespaced_network_policy(
-        body["metadata"]["name"], ns, body,
-        field_manager="omp-operator",
-        force=True,
-        _content_type="application/apply-patch+yaml",
+    try:
+        net.create_namespaced_network_policy(ns, body)
+    except k8s.ApiException as exc:
+        if exc.status != 409:
+            raise
+
+
+
+
+def _copy_secret(v1: k8s.CoreV1Api, ns: str, secret_name: str, src_ns: str = "omp-system") -> bool:
+    """Copy/refresh a Secret from src_ns into ns. True if present, False if source absent.
+    Used only for ghcr-pull-secret until the session image is mirrored to Artifact Registry."""
+    try:
+        src = v1.read_namespaced_secret(secret_name, src_ns)
+    except k8s.ApiException as exc:
+        if exc.status == 404:
+            return False
+        raise
+    dst = k8s.V1Secret(
+        metadata=k8s.V1ObjectMeta(name=secret_name, namespace=ns),
+        type=src.type,
+        data=src.data,
     )
-
-
+    try:
+        v1.create_namespaced_secret(ns, dst)
+    except k8s.ApiException as exc:
+        if exc.status != 409:
+            raise
+        v1.replace_namespaced_secret(secret_name, ns, dst)
+    return True
 
 
 def _apply_statefulset(ns: str, body: dict) -> None:
@@ -715,6 +736,12 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
     #    explicit create is a no-op if the StatefulSet already created it via VCT)
     _create_or_skip(v1.create_namespaced_persistent_volume_claim, ns, _pvc(ns))
 
+    # 2b. Copy ghcr-pull-secret into session namespace (needed until session image
+    #     is mirrored to Artifact Registry — registry migration is a TODO).
+    has_pull_secret = _copy_secret(v1, ns, "ghcr-pull-secret")
+    if has_pull_secret:
+        logger.info("Copied ghcr-pull-secret into %s", ns)
+
     # 4. ExternalSecret omp-creds (GSM subtrees → K8s Secret via ESO)
     if subtrees:
         _apply_custom_object(
@@ -726,13 +753,12 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
     cm = _configmap_from_master(ns, config_ref)
     has_cm = cm is not None
     if cm:
-        # SSA patch: upserts the ConfigMap on create and drift; field_manager owns config data.
-        v1.patch_namespaced_config_map(
-            "omp-config", ns, cm,
-            field_manager="omp-operator",
-            force=True,
-            _content_type="application/apply-patch+yaml",
-        )
+        try:
+            v1.create_namespaced_config_map(ns, cm)
+        except k8s.ApiException as exc:
+            if exc.status != 409:
+                raise
+            v1.replace_namespaced_config_map("omp-config", ns, cm)
 
     # 6. NetworkPolicies
     for np in _network_policies(ns):
@@ -772,7 +798,7 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
             patch.status["authBrokerUrl"] = "http://localhost:9999"
             logger.info("Auth-broker enabled for session %s (token stored in auth-broker-token secret)", name)
         _apply_service(ns, _headless_service(ns))
-        _apply_statefulset(ns, _statefulset(ns, name, desired_image, has_cm, extra_env, auth_broker=auth_broker, broker_token=broker_token))
+        _apply_statefulset(ns, _statefulset(ns, name, desired_image, has_cm, has_pull_secret, extra_env, auth_broker=auth_broker, broker_token=broker_token))
         created = True
         patch.status["restartedAt"] = restart_nonce or ""
 
