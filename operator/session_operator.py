@@ -292,6 +292,15 @@ def _statefulset(ns: str, session_name: str, image: str, has_configmap: bool,
         {"name": "docker-run", "emptyDir": {}},
     ]
 
+    # Task credentials are ALSO delivered as files. omp scrubs credential env
+    # vars from tool subprocesses (agent bash/python), so $GITHUB_TOKEN and
+    # $ATLASSIAN_* are empty inside tools; files bypass the env scrub and the
+    # agent reads them inline (see the credential-access skill). The envFrom
+    # above stays so omp itself can use provider creds (e.g. OLLAMA_CLOUD_API_KEY)
+    # for model calls. Secret volumes auto-refresh on rotation — no restart needed.
+    volume_mounts.append({"name": "omp-creds-files", "mountPath": "/etc/omp-creds", "readOnly": True})
+    volumes.append({"name": "omp-creds-files", "secret": {"secretName": "omp-creds", "optional": True, "defaultMode": 0o444}})
+
     if has_configmap:
         volume_mounts.append({"name": "omp-config", "mountPath": "/etc/omp", "readOnly": True})
         volumes.append({"name": "omp-config", "configMap": {"name": "omp-config"}})

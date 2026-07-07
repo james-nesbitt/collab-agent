@@ -5,10 +5,11 @@ description: What to do when a credential in this session is expired, revoked, o
 
 # Credential expiry & rotation
 
-Credentials reach this session as environment variables synced from GCP Secret
-Manager by the External Secrets Operator (see the `credential-access` skill). They
-are **read-only** here: this pod has no write path to Secret Manager, the GCE
-metadata server (`169.254.169.254`) is blocked, and ESO only *pulls* values in.
+Credentials reach this session synced from GCP Secret Manager by the External Secrets
+Operator — as **files** under `/etc/omp-creds/` for tools, and as env vars for omp's
+own model-provider use (see the `credential-access` skill). They are **read-only**
+here: this pod has no write path to Secret Manager, the GCE metadata server
+(`169.254.169.254`) is blocked, and ESO only *pulls* values in.
 **You cannot rotate a credential from inside the session.** Rotation is a host-side
 administrator action.
 
@@ -34,11 +35,13 @@ Check status codes without printing the token (see `credential-access` — never
 
 ```bash
 # GitHub
-curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $GITHUB_TOKEN" \
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -H "Authorization: Bearer $(cat /etc/omp-creds/GITHUB_TOKEN)" \
   https://api.github.com/user            # 200 = valid, 401 = rotate
 
 # Jira (basic auth: email + API token)
-curl -s -o /dev/null -w '%{http_code}\n' --user "$ATLASSIAN_EMAIL:$ATLASSIAN_TOKEN" \
+curl -s -o /dev/null -w '%{http_code}\n' \
+  --user "$(cat /etc/omp-creds/ATLASSIAN_EMAIL):$(cat /etc/omp-creds/ATLASSIAN_TOKEN)" \
   -H "Accept: application/json" https://mirantis.jira.com/rest/api/3/myself
 ```
 
@@ -61,15 +64,27 @@ The administrator rotates it on the host with the platform tooling:
 ```
 
 `vault-add` writes a new Secret Manager version and (re)grants the ESO service
-account access. The running session then picks up the new value by one of:
+account access. The credentials reach a running session through two mounts of the
+same `omp-creds` Secret, which refresh at different speeds:
 
-1. **Automatic ESO resync** — within the ExternalSecret `refreshInterval` (~1h), or
-2. **Session pod restart** — `kubectl delete pod omp-0 -n omp-session-<name>` (the
-   PVC-backed `$HOME` survives; only the env is re-read), or
-3. **Force resync** — `kubectl annotate externalsecret omp-creds -n omp-session-<name> force-sync=$(date +%s) --overwrite`.
+- **Files** (`/etc/omp-creds/…`, what tools read) — a mounted Secret volume that
+  **kubelet refreshes automatically** (~1 min) once ESO updates the Secret. Since you
+  `cat` the file on each call, no restart is needed; just wait for ESO + kubelet.
+- **Env vars** (what omp itself uses for model providers) — read once at container
+  start, so they only refresh on **pod restart**.
 
-Options 2 and 3 are also host/administrator actions. After rotation, re-run the
-status-code check above to confirm the credential now returns `200`.
+ESO first has to pull the new version into the Secret. To make that immediate rather
+than waiting for its `refreshInterval` (~1h), the administrator can force it on the host:
+
+```bash
+# On the host (administrator):
+kubectl annotate externalsecret omp-creds -n omp-session-<name> force-sync=$(date +%s) --overwrite
+# then, if the rotated credential is one omp itself uses (a model-provider key):
+kubectl delete pod omp-0 -n omp-session-<name>   # PVC-backed $HOME survives
+```
+
+After rotation, re-run the status-code check above to confirm the credential now
+returns `200`.
 
 ## Summary
 
