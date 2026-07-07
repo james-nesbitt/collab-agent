@@ -87,6 +87,7 @@ COPY platform/rules/                             /opt/omp/agent/rules/
 COPY platform/commands/commit-push-pr.md         /opt/omp/agent/commands/commit-push-pr.md
 COPY platform/skills/credential-access/SKILL.md  /opt/omp/agent/skills/credential-access/SKILL.md
 COPY platform/skills/mirantis-services/SKILL.md  /opt/omp/agent/skills/mirantis-services/SKILL.md
+COPY platform/skills/credential-rotation/SKILL.md /opt/omp/agent/skills/credential-rotation/SKILL.md
 
 # Session work-tree template → /opt/omp/work-template/.omp/
 COPY session-template/.omp/config.yml  /opt/omp/work-template/.omp/config.yml
