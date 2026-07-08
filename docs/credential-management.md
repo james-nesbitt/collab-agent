@@ -52,9 +52,11 @@ their own secrets independently.
 
 ### Adding personal credentials
 
-**Prerequisites:** `ompctl` needs `gcloud` + `kubectl` on PATH and the Python libs
-`google-cloud-secret-manager` and `kubernetes` (`pip install google-cloud-secret-manager kubernetes`).
-Admins without those can use `./administrator.sh vault-add users/<name>/<key>` instead (gcloud-only).
+**Prerequisites:** `ompctl` runs via `uv` (its `uv run --script` shebang auto-installs the
+`kubernetes` + `google-cloud-secret-manager` deps from inline PEP 723 metadata on first run —
+no manual pip). Needs `uv` on PATH and a kubeconfig (`gcloud container clusters get-credentials`,
+which authenticates via `gke-gcloud-auth-plugin`). Admins without a kubeconfig can use
+`./administrator.sh vault-add users/<name>/<key>` instead (gcloud-only).
 
 ```bash
 # Add an Atlassian API token (prompted hidden)
