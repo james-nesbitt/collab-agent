@@ -41,7 +41,7 @@ terraform init -backend-config="bucket=<tf-state-bucket>"
 terraform apply
 ```
 
-This single `terraform apply` replaces the old `provision` → `bootstrap` → `setup` sequence.
+This single `terraform apply` stands up the entire platform in one step.
 
 What it does:
 - Enables GCP APIs (`container.googleapis.com`, `secretmanager.googleapis.com`)
@@ -57,7 +57,7 @@ Local-model tuning (`omp_config_memory`, `omp_config_thinking`) is set in tfvars
 
 Now store credentials and create sessions.
 
-## 4. Store credentials
+## 2. Store credentials
 
 Credentials live in **GCP Secret Manager**, organised into subtrees. `vault-add`
 prompts for the value interactively (hidden — never echoed, never in shell history):
@@ -106,11 +106,12 @@ spec:
   subtrees: ["shared", "users/jnesbitt"]  # gets OLLAMA_CLOUD_API_KEY + ATLASSIAN_* + GITHUB_TOKEN
 ```
 
-### GHCR image pull secret
+### Container images
 
-> **Note:** The GHCR pull secret is managed by `./administrator.sh github-pull-secret`. Longer term, mirror images to Artifact Registry to remove this dependency.
+> **Note:** Session and operator images are published to **public** GHCR packages, so
+> session pods pull them with no image-pull secret. There is nothing to manage here.
 
-## 4b. Personal credentials (self-service)
+## 3. Personal credentials (self-service)
 
 Team members manage their own credentials in GSM without admin involvement:
 
@@ -125,21 +126,18 @@ GCP_PROJECT=tools-348616 ompctl cred ls
 
 Credentials are stored under `users/<username>/` in GSM. Sessions request them via `spec.subtrees: ["users/<name>"]`. See `ompctl --help` for full usage.
 
-## 5. Day to day
+## 4. Day to day
 
 - **Check on it.** `./administrator.sh status` prints a cluster summary, node list, and
   all current Sessions cluster-wide.
 - **Refresh kubectl credentials.** Run `gcloud container clusters get-credentials omp-cluster --zone europe-west1-b` (or `terraform output kubeconfig_command`) — useful when your kubeconfig has expired.
 - **Images.** Session and operator images are built and published to GHCR by the CI
   workflow (`.github/workflows/build-images.yml`); `administrator.sh` does not build or
-  push images. GHCR packages are currently **private**; the operator automatically copies
-  `ghcr-pull-secret` from `omp-system` into each session namespace so pods can pull
-  images. To remove this dependency, make the packages public on GitHub (repo → Packages →
-  package settings → Change visibility to Public) and delete the `ghcr-pull-secret` Secret
-  from `omp-system`.
+  push images. The GHCR packages are **public**, so session pods pull them directly with
+  no image-pull secret to manage.
 - **Gemini API key.** Store via `./administrator.sh vault-add shared/gemini-api-key` (prompts hidden). Add `"shared"` to session `spec.subtrees`. ESO syncs it automatically.
 
-## 6. Tearing it down
+## 5. Tearing it down
 
 ```bash
 cd infra && terraform destroy
@@ -181,8 +179,9 @@ Create Google Groups in Workspace:
 - `omp-admins@mirantis.com` — admin group; member of `gke-security-groups@`
 - `omp-team-<team>@mirantis.com` — one per team; member of `gke-security-groups@`
 
-`provision` enables `--security-group=gke-security-groups@${OMP_GROUP_DOMAIN}` on the
-cluster (GKE Groups-for-RBAC). `bootstrap` adds the `omp-admins@` ClusterRoleBinding.
+`terraform apply` enables `--security-group=gke-security-groups@<group_domain>` on the
+cluster (GKE Groups-for-RBAC) and the `omp-platform` chart adds the `omp-admins@`
+ClusterRoleBinding.
 Until the Workspace groups exist, all group RBAC bindings are inert — testable via
 `kubectl auth can-i --as-group=`.
 

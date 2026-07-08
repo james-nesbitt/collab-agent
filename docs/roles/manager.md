@@ -93,7 +93,7 @@ Want a different subtree — or multiple subtrees? Adjust `spec.subtrees`:
 
 ```yaml
 spec:
-  subtrees: ["services", "model"]
+  subtrees: ["shared", "users/jnesbitt"]
 ```
 
 Wait for the session to be ready:
@@ -262,6 +262,18 @@ operator's stopped branch takes priority. Set `state: running` first.
 To swap skills: restart the pod (annotation bump) — assets are re-seeded from the
 image on each pod start. Skills are discovered at session startup.
 
+### Transfer a local omp session onto the pod
+
+To seed a session's PVC with an existing local omp conversation, transfer it in:
+
+```bash
+./administrator.sh session-transfer <name> [LOCAL_DIR] [SESSION_ID]
+```
+
+This copies local `~/.omp` session state onto the pod's PVC so the agent resumes
+where you left off. It needs the vault service account, so the administrator runs
+it — the one session task that isn't plain `kubectl`.
+
 ## Credential isolation
 
 Per-session isolation is realized:
@@ -300,5 +312,6 @@ But guests are confined to that session's credentials.
 
 You never provision, start/stop, or destroy the GKE cluster — that's the
 [administrator](administrator.md). You never build or push images — that's the GHCR CI
-workflow. You never run `./administrator.sh` for session operations — those are plain
-`kubectl`. Operators just join the link you give them.
+workflow. You never run `./administrator.sh` for routine session operations
+(create/stop/start/delete) — those are plain `kubectl` (the exception is
+`session-transfer`, which the administrator runs). Operators just join the link you give them.
