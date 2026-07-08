@@ -38,15 +38,15 @@ The session loads the manager's global rules and context automatically, and they
 to you too. The ones that matter most:
 
 - **Never make the agent print a credential.** Don't ask it to `echo`, `cat`, `printenv`,
-  or otherwise reveal a token/key/password value. Credentials are already in the
-  environment — the right way to use one is inline in the command that needs it (e.g.
-  `curl -H "Authorization: Bearer $GITHUB_TOKEN" ...`). A printed secret is written to
-  the session transcript on disk and shown on every participant's screen.
+  or otherwise reveal a token/key/password value. Credentials are delivered as files under
+  `/etc/omp-creds/` — the right way to use one is inline in the command that needs it (e.g.
+  `curl -H "Authorization: Bearer $(cat /etc/omp-creds/GITHUB_TOKEN)" ...`). A printed
+  secret is written to the session transcript on disk and shown on every participant's screen.
 - **Treat the join link as a secret.** Anyone with it can read and (with a full link)
   steer the session. Don't forward it.
 
-If you need to know which credentials exist, ask the agent to list env-var **names**
-(not values) — the installed `credential-access` skill explains how.
+If you need to know which credentials exist, ask the agent to list credential **names**
+(`ls /etc/omp-creds/`, not values) — the installed `credential-access` skill explains how.
 
 ## Good to know
 

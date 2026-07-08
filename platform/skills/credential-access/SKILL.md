@@ -1,6 +1,6 @@
 ---
 name: credential-access
-description: How to discover and use credentials in this session pod. Use when a task needs an API token, key, password, or other secret to call an external service (e.g. GitHub, Jira, cloud APIs). Explains that credentials are delivered as files under /etc/omp-creds (because omp hides credential env vars from tool subprocesses), how to find them by name, and the hard rule never to print their values.
+description: How to discover and use credentials in this session pod. Use when a task needs an API token, key, password, or other secret to call an external service (e.g. GitHub, Jira, cloud APIs). Explains that credentials are delivered as files under /etc/omp-creds (the version-independent path, since some omp builds hide credential env vars from tool subprocesses), how to find them by name, and the hard rule never to print their values.
 ---
 
 # Credential access
@@ -11,12 +11,13 @@ Operator and mounted read-only. **Read them from files, not the environment.**
 
 ## Why files, not `$ENV_VARS`
 
-omp deliberately **scrubs credential environment variables from tool subprocesses** (the
-bash/python your tools run in). Inside a tool, `$GITHUB_TOKEN` and `$ATLASSIAN_TOKEN`
-expand to *empty* and `os.environ` does not contain them — this is by design, so secrets
-never leak into tool arguments the model can see. Do **not** conclude "the credential
-isn't injected" from an empty env var or `os.environ` check — that check is meaningless
-here. The credential lives in `/etc/omp-creds/<NAME>`.
+Read credentials from the files — **not** from the environment. How omp exposes
+credential env vars to tool subprocesses (the bash/python your tools run in) varies by
+omp version: some builds **scrub** them (so `$GITHUB_TOKEN` and `$ATLASSIAN_TOKEN` expand
+to *empty* and `os.environ` omits them), others pass them through obfuscated. The files
+are the one path that behaves the same on every version. So do **not** conclude "the
+credential isn't injected" from an empty env var or `os.environ` check — that check is
+unreliable here. The credential always lives in `/etc/omp-creds/<NAME>`; read it there.
 
 ## Discover what's available (NAMES only)
 

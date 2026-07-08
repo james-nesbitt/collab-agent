@@ -123,6 +123,10 @@ through `vault-add` as well.
 `ompctl` is a Python CLI for operations that are genuinely imperative (credentials,
 session lifecycle, auth flows). It requires `GCP_PROJECT` to be set; vault/cred commands
 that grant ESO access also need `OMP_ESO_SA`.
+It also needs `gcloud` + `kubectl` on PATH and the Python libs
+`google-cloud-secret-manager` and `kubernetes`
+(`pip install google-cloud-secret-manager kubernetes`). Admins without the Python libs
+can add user credentials with `./administrator.sh vault-add users/<name>/<key>` (gcloud-only).
 
 ### Credential management
 

@@ -11,11 +11,10 @@ registry: "ghcr.io/james-nesbitt/collab-agent"
 # `registry`. Set to the Artifact Registry path when running a locally-built
 # operator that isn't published to GHCR (e.g. pre-merge Option B/C fixes).
 operatorRegistry: ""
-# sessionImageTag: omp-session image tag. NOTE: the 2026-07-06 daily-rebuild omp
-# binary has a fatal `getSuggestions` regression ("K7 is not a function") that
-# crashes the process on slash-command entry (e.g. /collab) and the startup
-# Escape auto-dismiss — pin an earlier known-good build via
-# infra/terraform.tfvars `session_image_tag` (verified good: 2026-06-29 build).
+# sessionImageTag: omp-session image tag. The image bakes omp 16.3.11 (pinned in the
+# Dockerfile), which fixes the earlier `getSuggestions` crash and speaks collab protocol
+# v3. `latest` tracks the newest CI build on the default branch; pin a specific
+# `sha-<digest>` via infra/terraform.tfvars `session_image_tag` if you need to freeze it.
 sessionImageTag: "latest"
 operatorImageTag: "latest"
 # relay: COLLAB_RELAY for session pods. Empty = omp uses its built-in default

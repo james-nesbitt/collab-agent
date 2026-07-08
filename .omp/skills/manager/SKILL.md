@@ -32,12 +32,12 @@ metadata:
   name: work
   namespace: omp-system
 spec:
-  subtrees: ["services"]
+  subtrees: ["shared"]
   view: false
 EOF
 ```
 
-Repeat `--subtrees` by listing more entries, e.g. `["services", "model"]`.
+List more entries in `spec.subtrees` as needed, e.g. `["shared", "users/jnesbitt"]`.
 
 Wait for the session to reach `Hosting`:
 ```bash
@@ -207,7 +207,7 @@ metadata:
   name: work
   namespace: omp-system
 spec:
-  subtrees: ["services"]
+  subtrees: ["shared"]
   authBroker: true
 EOF
 

@@ -38,10 +38,12 @@ control agents.
 ## Rules you work under (loaded automatically by the session)
 
 - **Never make the agent print a credential.** Don't ask it to `echo`/`cat`/`printenv` a
-  token/key/password. Credentials are already in the pod env — the right use is *inline*
-  in the command that needs it (e.g. `curl -H "Authorization: Bearer $GITHUB_TOKEN" …`).
+  token/key/password. Credentials are delivered as files under `/etc/omp-creds/` — the
+  right use is *inline* in the command that needs it (e.g.
+  `curl -H "Authorization: Bearer $(cat /etc/omp-creds/GITHUB_TOKEN)" …`).
   A printed secret lands in the on-disk transcript and on every participant's screen. To
-  see what exists, ask for env-var **names** only (the `credential-access` skill explains).
+  see what exists, ask for credential **names** only (`ls /etc/omp-creds/`; the
+  `credential-access` skill explains).
 - **Treat the join link as a secret.** Anyone with a full link can read *and steer* the
   session; a view link can read. Don't forward it.
 

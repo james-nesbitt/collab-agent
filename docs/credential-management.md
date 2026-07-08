@@ -10,14 +10,20 @@ and how to wire up specific services.
 Two injection layers, applied in order (later wins for the same key):
 
 ```
-GSM vault  ──→  ESO  ──→  omp-creds (per-session K8s Secret)  ──→  pod envFrom
-                                                                         ↑
-Session CR spec.env  ──────────────────────────────────────────→  pod env []
+                                            ┌─→ pod envFrom            (omp process: model-provider keys)
+GSM vault ─→ ESO ─→ omp-creds (K8s Secret) ─┤
+                                            └─→ /etc/omp-creds/ files  (agent tools: read via $(cat …))
+
+Session CR spec.env ─────────────────────────→ pod env []
 ```
+
+**Session tools read credentials from the `/etc/omp-creds/` files, not env vars** — some
+omp builds scrub credential env from tool subprocesses, so files are the version-independent
+path. See the `credential-access` skill. (omp's own model-provider keys still come via envFrom.)
 
 | Layer | Scope | Managed by | Rotation |
 |---|---|---|---|
-| `omp-creds` | per-session, per-subtree | GSM + ESO | ESO re-syncs hourly; immediate on session restart |
+| `omp-creds` | per-session, per-subtree | GSM + ESO | ESO re-syncs hourly (or force-sync); files auto-refresh ~1 min, env vars on pod restart |
 | `spec.env` | single session | Session CR | patch CR; restart pod |
 
 Credentials live in GSM subtrees. The platform ships with two subtrees:
@@ -45,6 +51,10 @@ No admin involvement after initial cluster onboarding — users add and rotate
 their own secrets independently.
 
 ### Adding personal credentials
+
+**Prerequisites:** `ompctl` needs `gcloud` + `kubectl` on PATH and the Python libs
+`google-cloud-secret-manager` and `kubernetes` (`pip install google-cloud-secret-manager kubernetes`).
+Admins without those can use `./administrator.sh vault-add users/<name>/<key>` instead (gcloud-only).
 
 ```bash
 # Add an Atlassian API token (prompted hidden)
@@ -146,11 +156,14 @@ ompctl cred add github-token   # prompted hidden; stores under users/<you>/githu
 
 Add `users/<your-username>` to `spec.subtrees` in the Session CR.
 
-The `gh` CLI picks up `GITHUB_TOKEN` or `GH_TOKEN` automatically — no `gh auth
-login` needed. For API calls use it inline:
+Session **tools** read credentials from files under `/etc/omp-creds/` (see the
+`credential-access` skill). Reference the file inline — for `gh` and for raw API calls:
 
 ```bash
-curl -fsS -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user
+# gh CLI (feed the token from the file for this command)
+GH_TOKEN="$(cat /etc/omp-creds/GITHUB_TOKEN)" gh api user
+# raw API
+curl -fsS -H "Authorization: Bearer $(cat /etc/omp-creds/GITHUB_TOKEN)" https://api.github.com/user
 ```
 
 **SSH-based git:** SSH keys are not env vars. Place the private key in `~/.ssh/`
@@ -164,7 +177,7 @@ session's git config (once, persists on PVC):
 
 ```bash
 git config --global credential.helper \
-  '!f() { echo "username=x-access-token"; echo "password=$GITHUB_TOKEN"; }; f'
+  '!f() { echo "username=x-access-token"; echo "password=$(cat /etc/omp-creds/GITHUB_TOKEN)"; }; f'
 ```
 
 ---

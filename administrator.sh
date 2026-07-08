@@ -63,7 +63,7 @@
 #   ADMIN_GCP_ACCOUNT  (default: current gcloud account)
 #   OMP_IMAGE_TAG      (default: latest)
 #   OMP_GROUP_DOMAIN   (default: mirantis.com) — Google Workspace domain for RBAC groups
-#   SUBTREE            (default: services) — vault subtree
+#   SUBTREE            (default: shared) — vault subtree used by vault-ls when unset
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -86,7 +86,7 @@ OMP_IMAGE_TAG="${OMP_IMAGE_TAG:-latest}"
 OMP_SESSION_IMAGE_TAG="${OMP_SESSION_IMAGE_TAG:-latest}"
 OMP_GROUP_DOMAIN="${OMP_GROUP_DOMAIN:-mirantis.com}"
 
-SUBTREE="${SUBTREE:-services}"
+SUBTREE="${SUBTREE:-shared}"
 SESSION_NS="omp-system"
 
 # GCP service account emails
@@ -460,7 +460,7 @@ cmd_setup() {
     echo "  ClusterSecretStore: omp-gsm (${eso_ver})"
     echo "  ConfigMap omp-config in ${SESSION_NS}"
     echo ""
-    echo "  Vault:    printf '%s' \"\$VAL\" | ./administrator.sh vault-add services/my/key"
+    echo "  Vault:    printf '%s' \"\$VAL\" | ./administrator.sh vault-add shared/my-key"
     echo "  Tune:     ./administrator.sh tune [--memory] [--thinking]"
     echo "  Sessions: see the manager skill for direct kubectl session management"
 }
