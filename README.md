@@ -10,16 +10,19 @@ omp **collab** — operators join from any machine with `omp join`.
 See [docs/architecture.md](docs/architecture.md) for the full picture.
 
 ```
-administrator.sh  — GKE cluster + IAM lifecycle
-lib/common.sh     — shared config + helpers (sourced)
-Dockerfile        — session image (rootless docker+podman + mise/bun/omp)
-docker/           — entrypoint.sh
-operator/         — kopf Session operator (Python)
-k8s/              — CRD, RBAC, operator Deployment, ESO ClusterSecretStore
-platform/         — global agent context (baked into image)
-session-template/ — per-session .omp/ seed (baked into image)
-.github/          — CI: build + push images to GHCR
-docs/             — architecture, role guides, planning
+infra/             — Terraform: GKE cluster + IAM + ESO + operator (Helm chart)
+charts/omp-platform/ — Helm chart (operator, ESO store, omp-config ConfigMap)
+administrator.sh   — admin CLI: vault (credentials), teams, status, credentials (kubeconfig), session-transfer
+ompctl             — self-service credential + session CLI
+lib/common.sh      — shared config + helpers (sourced)
+Dockerfile         — session image (rootless docker+podman + mise/bun/omp)
+docker/            — entrypoint.sh
+operator/          — kopf Session operator (Python)
+k8s/               — CRD, RBAC, operator Deployment, ESO ClusterSecretStore
+platform/          — global agent context (baked into image)
+session-template/  — per-session .omp/ seed (baked into image)
+.github/           — CI: build + push images to GHCR
+docs/              — architecture, role guides, planning
 ```
 
 ## Quickstart
@@ -27,31 +30,24 @@ docs/             — architecture, role guides, planning
 ### 1. Stand up the infrastructure (administrator)
 
 ```bash
-# Prerequisites: gcloud + kubectl + helm, authenticated
-./administrator.sh provision   # GKE cluster + GCP SAs + IAM
-./administrator.sh bootstrap   # ESO + CRD + operator
+# Prerequisites: gcloud + kubectl + terraform (>=1.7) + helm, authenticated; a GCS bucket for TF state
+cd infra && terraform init -backend-config="bucket=<state-bucket>" && terraform apply
+# One apply provisions the GKE cluster + GCP SAs + IAM + ESO + operator (omp-platform Helm chart)
 ```
 
 ### 2. Configure the platform and vault (administrator)
 
 ```bash
-./administrator.sh setup
-# Shared platform credentials (e.g. an Ollama Cloud key):
-./administrator.sh vault-add shared/ollama-cloud-api-key    # prompts interactively
-# Personal credentials are self-managed via user-add + user-cred-add (see administrator guide)
-./administrator.sh vault-ls shared   # confirm
+# Platform config/tuning lives in infra/terraform.tfvars (e.g. omp_config_memory=true,
+# omp_config_thinking=true), then `terraform apply` re-renders the omp-config ConfigMap.
+# Shared platform credentials (hidden prompt -> GSM):
+./administrator.sh vault-add shared/ollama-cloud-api-key   # e.g. an Ollama Cloud key
+./administrator.sh vault-add shared/gemini-api-key         # model bootstrap key (sessions auto-start)
+./administrator.sh vault-ls shared                         # confirm (names only, never values)
+# Personal credentials are self-service via ompctl (stored under users/<you>/):
+ompctl cred add atlassian-token     # -> users/<you>/atlassian-token
+# Reference personal creds from a session with spec.subtrees: ["users/<name>"]
 ```
-
-### 2.5. Bootstrap model credentials (administrator, one-time)
-
-```bash
-kubectl create secret generic omp-bootstrap-env -n omp-system \
-  --from-literal=GEMINI_API_KEY=<key>
-```
-
-With this Secret in place the operator copies it into every session namespace
-automatically, allowing sessions to start and produce a join link before Anthropic
-OAuth is completed interactively.
 
 ### 3. Launch a session (manager)
 
@@ -61,16 +57,16 @@ apiVersion: omp.mirantis.io/v1alpha1
 kind: Session
 metadata:
   name: work
-  namespace: omp-system  # Session CRs can live in any namespace; omp-system or omp-sessions are conventional
+  namespace: omp-system  # Session CRs live in omp-system or omp-team-<team>
 spec:
   subtrees: ["shared"]
   view: false
 EOF
 kubectl wait --for=jsonpath='{.status.phase}'=Hosting session/work -n omp-system --timeout=180s
-# Preferred: if omp-bootstrap-env is present (step 2.5) the session starts automatically
-# and the join link is ready; complete Anthropic OAuth with:
-#   ./administrator.sh auth work anthropic   # device code — visit the URL in your browser
-# (token persists on the session PVC). Other providers: gcloud · aws · az · gh (PAT on stdin).
+# Sessions start authenticated when shared/gemini-api-key (or another provider key) is in the
+# vault, so the join link is ready immediately. Complete interactive provider auth with:
+#   ompctl auth work anthropic   # device code — visit the URL in your browser
+# (token persists on the session PVC). Providers: anthropic · gcloud · aws · az · gh.
 # Tiny-model weights (session titles, memory) are baked into the image — no downloads needed.
 kubectl get session work -n omp-system -o jsonpath='{.status.joinLink}'  # prints join link
 ```
@@ -87,20 +83,19 @@ No omp installed? Paste the link at `my.omp.sh`.
 
 ```bash
 kubectl delete session work -n omp-system  # delete session + namespace + PVC
-./administrator.sh destroy     # delete cluster + SAs + IAM bindings
+cd infra && terraform destroy              # delete cluster + SAs + IAM bindings
 ```
 
 ## Configuration
 
-All defaults are overridable via env vars. Key ones:
+Cluster and image settings are primarily set via `infra/terraform.tfvars` now. A few
+environment variables tune the `administrator.sh` / `ompctl` helpers:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `GCP_PROJECT` | `tools-348616` | GCP project |
 | `ZONE` | `europe-west1-b` | GKE zone |
 | `CLUSTER_NAME` | `omp-cluster` | GKE cluster name |
-| `OMP_REGISTRY` | `ghcr.io/james-nesbitt/collab-agent` | Image registry |
-| `OMP_IMAGE_TAG` | `latest` | Image tag |
 | `ADMIN_GCP_ACCOUNT` | current gcloud account | Account granted cluster-admin |
 | `OMP_GROUP_DOMAIN` | `mirantis.com` | Workspace domain for RBAC groups |
 

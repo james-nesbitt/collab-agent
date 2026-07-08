@@ -61,7 +61,7 @@ Each team has:
 
 | Namespace pattern | Created by | Owner |
 |---|---|---|
-| `omp-system` | bootstrap | operator infra |
+| `omp-system` | `terraform apply` (Helm chart) | operator infra |
 | `omp-team-<team>` | `team-add <team>` | team CR home |
 | `omp-session-<team>-<name>` | operator (team sessions) | team session |
 | `omp-session-<name>` | operator (admin sessions, no `spec.team`) | admin-created session |
@@ -97,8 +97,8 @@ The collab join link stays inherently joinable-by-link; this access control mode
 This is idempotent. It:
 1. Creates namespace `omp-team-<team>` with label `omp.mirantis.io/team=<team>`.
 2. Creates Role `omp-team-sessions` and RoleBinding → `group:omp-team-<team>@mirantis.com`.
-   The Role includes `sessions` CRUD **and** `secrets` CRUD so team members can manage
-   their own personal credential Secrets without admin involvement.
+   The Role grants `sessions` CRUD so team members create and manage their own Session
+   CRs; personal credentials are self-service in GSM (no per-user K8s Secrets).
 3. Grants `roles/container.clusterViewer` IAM — members can `get-credentials`.
 4. Grants `roles/secretmanager.viewer` IAM — members can list vault entry names (never values).
 
@@ -111,10 +111,8 @@ metadata:
   name: my-session
   namespace: omp-team-<team>      # must match spec.team
 spec:
-  subtrees: ["shared"]            # platform creds from vault
+  subtrees: ["shared", "users/<name>"]   # shared vault creds + your own personal creds
   team: <team>
-  credentialSecrets:              # personal creds from K8s Secrets in this namespace
-    - my-creds
 ```
 
 The operator enforces that `spec.team` matches the CR namespace (`omp-team-<team>`).
@@ -122,36 +120,38 @@ A CR with `spec.team: foo` created in `omp-team-bar` is rejected with status `Fa
 
 ## Self-service session credentials
 
-Team members manage personal credentials via **K8s Secrets in their team namespace** —
-no admin or GSM access required.
+Team members manage personal credentials as **self-service GSM entries** under
+`users/<name>/` — no per-user K8s Secrets and no admin involvement required.
 
-### Creating and referencing personal credential secrets
+### Creating and referencing personal credentials
 
 ```bash
-# Admin runs once to create the user namespace:
-./administrator.sh user-add jnesbitt
+# Self-service: add/rotate your own credential (value prompted hidden — safe from ps/history).
+# Stored at users/<you>/<key> in GSM:
+ompctl cred add atlassian-token
 
-# User creates/rotates their own secret (values prompted hidden — safe from ps/history):
-./administrator.sh user-cred-add atlassian ATLASSIAN_TOKEN ATLASSIAN_EMAIL
+# Admin alternative (no python deps):
+./administrator.sh vault-add users/jnesbitt/atlassian-token
 ```
 
-Reference one or more secrets in the Session CR:
+Request them in the Session CR via `spec.subtrees`:
 
 ```yaml
 spec:
-  subtrees: ["shared"]         # vault creds (OLLAMA_CLOUD_API_KEY etc.)
-  credentialSecrets:
-    - jnesbitt/atlassian       # format: "<user>/<secret>" — operator reads omp-user-jnesbitt
-    - jnesbitt/github-token    # multiple supported; later entries win
+  subtrees:
+    - shared                 # platform vault creds (OLLAMA_CLOUD_API_KEY etc.)
+    - users/jnesbitt         # your personal creds (ATLASSIAN_TOKEN, GITHUB_TOKEN, …)
 ```
 
-Ownership is enforced at admission: the `omp-credential-secrets-ownership` ValidatingAdmissionPolicy
-rejects any Session CR whose `credentialSecrets` entries are not prefixed with the requesting user's
-username (admins and the operator are exempt).
+Ownership is enforced at admission: the `omp-credential-secrets-ownership`
+`ValidatingAdmissionPolicy` rejects any Session CR whose `spec.subtrees` requests a
+`users/<name>` subtree other than the requester's own (`users/<self>`). The `shared`
+subtree is open to all; admins and the operator are exempt.
 
-The operator copies each named Secret from `omp-user-<user>` into the session pod namespace
-and injects it via `envFrom`. Team members can also list, describe, and delete their own
-Secrets — RBAC in `omp-team-<team>` grants full secrets CRUD in that namespace only.
+At session creation the operator builds an `omp-creds` `ExternalSecret` from the
+requested subtrees; ESO syncs the matching GSM entries into the session namespace and
+the pod consumes them via `envFrom` plus files under `/etc/omp-creds/`. Team members
+never hold personal K8s Secrets and never read the synced values directly.
 
 Session pod namespaces (`omp-session-<team>-<name>`) do **not** grant team members `secrets`
 access — they can exec and view logs but never read the injected credential values directly.
@@ -179,9 +179,11 @@ Delete all team sessions before `team-rm`.
 The default domain is `mirantis.com`. Override for a different Workspace:
 
 ```bash
-OMP_GROUP_DOMAIN=example.com ./administrator.sh provision
+# Platform-wide: set the domain in infra/terraform.tfvars, then re-apply:
+#   group_domain = "example.com"   →  cd infra && terraform apply
+# Per team (administrator.sh):
 OMP_GROUP_DOMAIN=example.com ./administrator.sh team-add myteam
 ```
 
-The operator reads `OMP_GROUP_DOMAIN` from its Deployment env (set by `bootstrap` via
-`k8s/operator-deploy.yaml`).
+The operator reads `OMP_GROUP_DOMAIN` from its Deployment env, which the omp-platform
+Helm chart renders from the `group_domain` tfvars value on `terraform apply`.

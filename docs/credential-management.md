@@ -217,7 +217,7 @@ obfuscation (JSON content does not match the default keyword patterns).
 | `AWS_ACCESS_KEY_ID` | `shared/aws/access-key-id` | auto-obfuscated (`KEY` suffix) |
 | `AWS_SECRET_ACCESS_KEY` | `shared/aws/secret-access-key` | auto-obfuscated (`KEY` suffix) |
 | `AWS_SESSION_TOKEN` | runtime injection (Approach C) | short-lived; rotate via runtime patch |
-| `AWS_DEFAULT_REGION` | `shared/aws/default-region` | not sensitive; safe to put in bootstrap-env |
+| `AWS_DEFAULT_REGION` | `shared/aws/default-region` | not sensitive; safe to set via `spec.env` |
 
 ```bash
 printf '%s' "$AWS_KEY_ID"     | ./administrator.sh vault-add shared/aws/access-key-id
@@ -273,4 +273,4 @@ these substrings (case-insensitive): `TOKEN`, `KEY`, `SECRET`, `PASSWORD`.
 
 For variables that don't match (e.g. `ATLASSIAN_EMAIL`, `AZURE_TENANT_ID`,
 `GCP_PROJECT`), add a value-shape regex to `platform/secrets.yml` and re-run
-`./administrator.sh setup` to rebuild the ConfigMap.
+`terraform apply` (from `infra/`) to rebuild the omp-config ConfigMap.

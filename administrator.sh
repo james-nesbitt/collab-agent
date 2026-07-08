@@ -1,31 +1,20 @@
 #!/usr/bin/env bash
-# administrator.sh — administrator role: GKE cluster lifecycle + IAM + platform config + vault.
+# administrator.sh — administrator role: credential vault, teams, status, and local-session
+# transfer. Cluster provisioning/config is via Terraform (infra/); sessions via kubectl + ompctl.
 #
 # Usage:
 #   ./administrator.sh <subcommand> [args...]
 #
 # Subcommands:
-#   provision                Create the GKE cluster, GCP service accounts, and IAM
-#                            bindings (run once). Idempotent.
-#   bootstrap                Install platform runtime on the cluster: RBAC, ESO,
-#                            Session CRD, and the Session operator.
+#   Provisioning/destroy is via Terraform (cd infra && terraform apply|destroy); platform config/tuning via infra/terraform.tfvars + terraform apply. Session auth/port-forward/lifecycle are via ompctl. See the administrator + manager skills.
 #   credentials              Fetch kubectl credentials for the cluster.
 #   status                   Cluster summary + node + session list.
-#   destroy                  Delete the cluster, GCP SAs, and IAM bindings.
-#   setup                    Configure the ESO ClusterSecretStore, create/update the
-#                            master omp-config ConfigMap in omp-system (secrets.enabled,
-#                            modelRoles, portable tuning), and print SETUP_OK.
 #   vault-add ENTRY          Insert a credential into GCP Secret Manager (prompted
 #                            interactively, never echoed).
 #                            Bare key (no /): auto-scoped to users/<gcloud-user>/<key>
 #                            Full path: shared/<key>  or  users/<name>/<key>
 #   vault-ls [SUBTREE]       List vault entry names (never values). No arg: shows
 #                            shared/ + users/<gcloud-user>/ entries for current user.
-#   tune [--memory] [--thinking]
-#                            Patch the master omp-config ConfigMap with opt-in tuning:
-#                            mnemopi long-term memory (--memory) and/or automatic
-#                            thinking-level selection (--thinking). No flag = both.
-#                            New sessions pick it up; running pods on next restart.
 #   Personal credentials     Store personal credentials via 'vault-add users/<name>/<key>'
 #                            (hidden prompt → GSM). Reference in sessions with
 #                            spec.subtrees: ["users/<name>"].
@@ -35,15 +24,6 @@
 #   team-ls                  List all team namespaces and their bound groups.
 #   team-rm <team>           Prompt, then delete omp-team-<team> namespace and remove
 #                            IAM binding. Warns if session namespaces still exist.
-#   auth NAME PROVIDER [CONTAINER]
-#                            Interactive provider login INSIDE a session pod (device code
-#                            or token on stdin). Providers: anthropic gcloud aws
-#                            aws-configure az gh. Credentials persist on the session PVC.
-#                            For AWS SSO: run aws-configure once, then auth periodically.
-#                            Set AWS_PROFILE via spec.env in the Session CR for auto-select.
-#   port-forward NAME LOCAL_PORT [REMOTE_PORT]
-#                            Forward a session pod port to localhost (for browser-redirect
-#                            OAuth, e.g. aws configure sso).
 #   session-transfer NAME [LOCAL_DIR] [SESSION_ID]
 #                            Copy a local omp session onto a GKE session pod's PVC so the
 #                            conversation resumes there.
@@ -57,11 +37,8 @@
 # Configuration (override via environment):
 #   GCP_PROJECT        (default: tools-348616)
 #   ZONE               (default: europe-west1-b)
-#   REGION             (default: europe-west1)
 #   CLUSTER_NAME       (default: omp-cluster)
-#   NODE_MACHINE_TYPE  (default: e2-standard-4)
 #   ADMIN_GCP_ACCOUNT  (default: current gcloud account)
-#   OMP_IMAGE_TAG      (default: latest)
 #   OMP_GROUP_DOMAIN   (default: mirantis.com) — Google Workspace domain for RBAC groups
 #   SUBTREE            (default: shared) — vault subtree used by vault-ls when unset
 set -euo pipefail
@@ -77,13 +54,7 @@ LOG_TAG="admin"
 # ---------------------------------------------------------------------------
 # Administrator-only configuration
 # ---------------------------------------------------------------------------
-NODE_MACHINE_TYPE="${NODE_MACHINE_TYPE:-e2-standard-4}"
 ADMIN_GCP_ACCOUNT="${ADMIN_GCP_ACCOUNT:-$(gcloud config get-value account 2>/dev/null)}"
-OMP_REGISTRY="${OMP_REGISTRY:-ghcr.io/james-nesbitt/collab-agent}"
-OMP_IMAGE_TAG="${OMP_IMAGE_TAG:-latest}"
-# Session image tag defaults to latest independently of the operator tag so that
-# restarted sessions always pick up the newest omp build.
-OMP_SESSION_IMAGE_TAG="${OMP_SESSION_IMAGE_TAG:-latest}"
 OMP_GROUP_DOMAIN="${OMP_GROUP_DOMAIN:-mirantis.com}"
 
 SUBTREE="${SUBTREE:-shared}"
@@ -96,274 +67,12 @@ SA_OPERATOR="omp-operator@${GCP_PROJECT}.iam.gserviceaccount.com"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-# render <template-file> — envsubst the file to stdout using current env.
-render() {
-    local f="$1"
-    [[ -f "${f}" ]] || die "manifest not found: ${f}"
-    GCP_PROJECT="${GCP_PROJECT}" \
-    ZONE="${ZONE}" \
-    CLUSTER_NAME="${CLUSTER_NAME}" \
-    REGION="${REGION}" \
-    OMP_REGISTRY="${OMP_REGISTRY}" \
-    OMP_IMAGE_TAG="${OMP_IMAGE_TAG}" \
-    OMP_SESSION_IMAGE_TAG="${OMP_SESSION_IMAGE_TAG}" \
-    OMP_GROUP_DOMAIN="${OMP_GROUP_DOMAIN}" \
-    ADMIN_GCP_ACCOUNT="${ADMIN_GCP_ACCOUNT}" \
-        envsubst < "${f}"
-}
-
-# sa_exists <email> — return 0 if GCP SA exists.
-sa_exists() {
-    gcloud iam service-accounts describe "$1" \
-        --project="${GCP_PROJECT}" --format="value(email)" >/dev/null 2>&1
-}
-
-# Detect the served ESO API version (v1 or v1beta1).
-eso_api_version() {
-    local versions
-    versions=$(kubectl get crd externalsecrets.external-secrets.io \
-               -o jsonpath='{.spec.versions[*].name}' 2>/dev/null || echo "")
-    if echo "${versions}" | grep -qw "v1"; then
-        echo "external-secrets.io/v1"
-    else
-        echo "external-secrets.io/v1beta1"
-    fi
-}
-
 # Validate a session/subtree token (no shell metacharacters → safe to interpolate).
 valid_token() { [[ "$1" =~ ^[A-Za-z0-9_/-]+$ ]]; }
-
-# Build the omp config.yml content (base tuning block).
-_base_config_yml() {
-    cat <<'CONFIG'
-# omp platform config — managed by administrator.sh setup/tune
-secrets:
-  enabled: true
-modelRoles:
-  default: google/gemini-3.1-pro-preview
-  plan: google/gemini-3.1-pro-preview
-  slow: google/gemini-1.5-pro
-  smol: google/gemini-1.5-flash
-providers:
-  # Local ONNX tiny-models for background tasks. Weights are downloaded from
-  # HuggingFace on first use and cached on the session PVC (~/.cache/huggingface/).
-  # All models run on CPU (q4 quantised); subsequent warm loads are sub-3s.
-  #
-  # tinyModel: session title generation (~212 MB, best speed/quality at sub-1B)
-  tinyModel: lfm2-350m
-  # memoryModel: Mnemopi extraction + consolidation (1.1 GB; best extraction precision)
-  memoryModel: qwen3-1.7b
-  # autoThinkingModel: auto-thinking difficulty classifier (reuses the memory model)
-  autoThinkingModel: qwen3-1.7b
-todo:
-  eager: always
-search:
-  contextBefore: 1
-  contextAfter: 1
-readLineNumbers: true
-lsp:
-  diagnosticsOnEdit: true
-steeringMode: all
-checkpoint:
-  enabled: true
-async:
-  enabled: true
-inspect_image:
-  enabled: true
-task:
-  isolation:
-    mode: rcopy
-    merge: patch
-    commits: ai
-  maxConcurrency: 8
-  eager: default
-mcp:
-  discoveryMode: true
-symbolPreset: nerd
-hideThinkingBlock: false
-CONFIG
-}
 
 # ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
-cmd_provision() {
-    command -v gcloud >/dev/null || die "gcloud not found in PATH"
-    [[ -n "${ADMIN_GCP_ACCOUNT}" ]] || die "Could not determine admin GCP account. Set ADMIN_GCP_ACCOUNT."
-
-    info "Project       : ${GCP_PROJECT}"
-    info "Cluster       : ${CLUSTER_NAME}"
-    info "Zone          : ${ZONE}"
-    info "Machine       : ${NODE_MACHINE_TYPE}"
-    info "Admin account : ${ADMIN_GCP_ACCOUNT}"
-
-    # 1. Enable required APIs
-    info "Enabling GCP APIs…"
-    gcloud services enable \
-        container.googleapis.com \
-        secretmanager.googleapis.com \
-        --project="${GCP_PROJECT}" --quiet
-
-    # 2. GKE cluster
-    if resource_exists "container clusters" "${CLUSTER_NAME}" --zone="${ZONE}"; then
-        warn "Cluster '${CLUSTER_NAME}' already exists — enabling Groups-for-RBAC if not set."
-        gcloud container clusters update "${CLUSTER_NAME}" \
-            --zone="${ZONE}" \
-            --project="${GCP_PROJECT}" \
-            --security-group="gke-security-groups@${OMP_GROUP_DOMAIN}" \
-            --quiet
-    else
-        info "Creating GKE cluster '${CLUSTER_NAME}'…"
-        gcloud container clusters create "${CLUSTER_NAME}" \
-            --project="${GCP_PROJECT}" \
-            --zone="${ZONE}" \
-            --num-nodes=3 \
-            --machine-type="${NODE_MACHINE_TYPE}" \
-            --image-type=UBUNTU_CONTAINERD \
-            --enable-dataplane-v2 \
-            --workload-pool="${GCP_PROJECT}.svc.id.goog" \
-            --no-enable-basic-auth \
-            --no-issue-client-certificate \
-            --release-channel=regular \
-            --security-group="gke-security-groups@${OMP_GROUP_DOMAIN}" \
-            --quiet
-        ok "Cluster created."
-    fi
-
-    # 3. GCP service accounts
-    if sa_exists "${SA_ESO}"; then
-        warn "SA '${SA_ESO}' already exists — skipping."
-    else
-        info "Creating GCP SA for ESO (value reader)…"
-        gcloud iam service-accounts create omp-eso \
-            --project="${GCP_PROJECT}" \
-            --description="ESO: reads GSM secret values for session namespaces" \
-            --display-name="omp-eso"
-        ok "SA omp-eso created."
-    fi
-
-    if sa_exists "${SA_OPERATOR}"; then
-        warn "SA '${SA_OPERATOR}' already exists — skipping."
-    else
-        info "Creating GCP SA for operator (metadata viewer)…"
-        gcloud iam service-accounts create omp-operator \
-            --project="${GCP_PROJECT}" \
-            --description="Session operator: lists GSM secret metadata" \
-            --display-name="omp-operator"
-        ok "SA omp-operator created."
-    fi
-
-    # 4. IAM roles — operator gets project-level viewer (metadata only);
-    #    ESO gets per-secret secretAccessor granted by vault-add (not project-wide).
-    info "Binding IAM roles…"
-    gcloud projects add-iam-policy-binding "${GCP_PROJECT}" \
-        --member="serviceAccount:${SA_OPERATOR}" \
-        --role="roles/secretmanager.viewer" \
-        --quiet
-
-    # 5. Workload Identity bindings
-    info "Binding Workload Identity for ESO…"
-    gcloud iam service-accounts add-iam-policy-binding "${SA_ESO}" \
-        --project="${GCP_PROJECT}" \
-        --role="roles/iam.workloadIdentityUser" \
-        --member="serviceAccount:${GCP_PROJECT}.svc.id.goog[external-secrets/external-secrets]" \
-        --quiet
-
-    info "Binding Workload Identity for operator…"
-    gcloud iam service-accounts add-iam-policy-binding "${SA_OPERATOR}" \
-        --project="${GCP_PROJECT}" \
-        --role="roles/iam.workloadIdentityUser" \
-        --member="serviceAccount:${GCP_PROJECT}.svc.id.goog[omp-system/omp-operator]" \
-        --quiet
-
-    # 6. Grant cluster access: admin user (break-glass) + admin group (GKE Groups-for-RBAC)
-    info "Granting container.admin to ${ADMIN_GCP_ACCOUNT}…"
-    gcloud projects add-iam-policy-binding "${GCP_PROJECT}" \
-        --member="user:${ADMIN_GCP_ACCOUNT}" \
-        --role="roles/container.admin" \
-        --quiet
-    info "Granting container.admin to group omp-admins@${OMP_GROUP_DOMAIN}…"
-    gcloud projects add-iam-policy-binding "${GCP_PROJECT}" \
-        --member="group:omp-admins@${OMP_GROUP_DOMAIN}" \
-        --role="roles/container.admin" \
-        --quiet
-
-    # Paranoia check: refuse broad IAM on container resources
-    local policy
-    policy=$(gcloud projects get-iam-policy "${GCP_PROJECT}" --format=json 2>/dev/null)
-    if echo "${policy}" | grep -qE '"allUsers"|"allAuthenticatedUsers"'; then
-        die "SECURITY: project IAM contains allUsers or allAuthenticatedUsers bindings. Inspect and remove before continuing."
-    fi
-
-    echo ""
-    echo "============================================================"
-    echo "  Provisioning complete"
-    echo "============================================================"
-    echo "  Cluster  : ${CLUSTER_NAME}"
-    echo "  Zone     : ${ZONE}"
-    echo ""
-    echo "  Next steps:"
-    echo "    ./administrator.sh bootstrap"
-    echo "    ./administrator.sh setup"
-    echo "============================================================"
-}
-
-cmd_bootstrap() {
-    command -v kubectl >/dev/null || die "kubectl not found in PATH"
-    command -v helm    >/dev/null || die "helm not found in PATH"
-
-    info "Fetching cluster credentials…"
-    cmd_credentials
-
-    # 1. RBAC: bind admin account to cluster-admin
-    info "Binding ${ADMIN_GCP_ACCOUNT} to cluster-admin…"
-    kubectl create clusterrolebinding omp-admin \
-        --clusterrole=cluster-admin \
-        --user="${ADMIN_GCP_ACCOUNT}" \
-        --dry-run=client -o yaml | kubectl apply -f -
-    # 1b. RBAC: bind omp-admins group to cluster-admin (additive — preserves user binding above)
-    info "Binding group omp-admins@${OMP_GROUP_DOMAIN} to cluster-admin…"
-    kubectl create clusterrolebinding omp-admins-group \
-        --clusterrole=cluster-admin \
-        --group="omp-admins@${OMP_GROUP_DOMAIN}" \
-        --dry-run=client -o yaml | kubectl apply -f -
-
-    # 2. External Secrets Operator via Helm
-    info "Installing External Secrets Operator…"
-    helm repo add external-secrets https://charts.external-secrets.io --force-update
-    helm upgrade --install external-secrets external-secrets/external-secrets \
-        -n external-secrets --create-namespace \
-        --set installCRDs=true \
-        --set "serviceAccount.annotations.iam\\.gke\\.io/gcp-service-account=${SA_ESO}" \
-        --wait
-
-    # 3. Apply CRD, RBAC, operator Deployment (envsubst rendered)
-    info "Applying Session CRD…"
-    render "${SCRIPT_DIR}/k8s/crd-session.yaml" | kubectl apply -f -
-
-    info "Applying credentialSecrets ownership policy…"
-    render "${SCRIPT_DIR}/k8s/vap-credential-secrets.yaml" | kubectl apply -f -
-
-    info "Applying operator RBAC…"
-    render "${SCRIPT_DIR}/k8s/operator-rbac.yaml" | kubectl apply -f -
-
-    info "Applying operator Deployment…"
-    render "${SCRIPT_DIR}/k8s/operator-deploy.yaml" | kubectl apply -f -
-
-    # 4. Wait for operator + ESO to be Available
-    info "Waiting for operator to be Available…"
-    kubectl rollout status deployment/omp-operator -n omp-system --timeout=120s
-    info "Waiting for ESO to be Available…"
-    kubectl rollout status deployment/external-secrets -n external-secrets --timeout=120s
-
-    echo ""
-    echo "BOOTSTRAP_OK"
-    echo "  ESO running in ns external-secrets"
-    echo "  Session operator running in ns omp-system"
-    echo ""
-    echo "  Next: ./administrator.sh setup"
-}
-
 cmd_credentials() {
     info "Fetching kubectl credentials for cluster '${CLUSTER_NAME}'…"
     gcloud container clusters get-credentials "${CLUSTER_NAME}" \
@@ -386,140 +95,6 @@ cmd_status() {
     echo ""
     info "Sessions:"
     kctl get sessions -n omp-system 2>/dev/null || echo "  (no sessions)"
-}
-
-cmd_destroy() {
-    echo ""
-    echo "WARNING: This will permanently delete:"
-    echo "  - GKE cluster  : ${CLUSTER_NAME} (${ZONE})"
-    echo "  - GCP SA       : ${SA_ESO}"
-    echo "  - GCP SA       : ${SA_OPERATOR}"
-    echo "  - IAM bindings for both SAs"
-    echo ""
-    read -r -p "Type 'yes' to confirm: " confirm
-    [[ "${confirm}" == "yes" ]] || { info "Aborted."; exit 0; }
-
-    if resource_exists "container clusters" "${CLUSTER_NAME}" --zone="${ZONE}"; then
-        info "Deleting cluster '${CLUSTER_NAME}'…"
-        gcloud container clusters delete "${CLUSTER_NAME}" \
-            --project="${GCP_PROJECT}" \
-            --zone="${ZONE}" \
-            --quiet
-    else
-        info "Cluster not found — skipping."
-    fi
-
-    for sa in "${SA_ESO}" "${SA_OPERATOR}"; do
-        if sa_exists "${sa}"; then
-            info "Deleting GCP SA '${sa}'…"
-            gcloud iam service-accounts delete "${sa}" \
-                --project="${GCP_PROJECT}" \
-                --quiet || warn "SA delete failed for ${sa} (may have already been removed)"
-        else
-            info "SA '${sa}' not found — skipping."
-        fi
-    done
-
-    ok "Destroy complete."
-}
-
-cmd_setup() {
-    require_cluster
-
-    # Fetch credentials if not already configured
-    gcloud container clusters get-credentials "${CLUSTER_NAME}" \
-        --zone="${ZONE}" --project="${GCP_PROJECT}" >/dev/null 2>&1
-
-    # 1. Render + apply ClusterSecretStore (detect ESO API version)
-    info "Detecting ESO API version…"
-    local eso_ver
-    eso_ver=$(eso_api_version)
-    info "ESO API version: ${eso_ver}"
-
-    info "Applying ClusterSecretStore omp-gsm…"
-    GCP_PROJECT="${GCP_PROJECT}" \
-    ZONE="${ZONE}" \
-    CLUSTER_NAME="${CLUSTER_NAME}" \
-        envsubst < "${SCRIPT_DIR}/k8s/clustersecretstore.yaml" \
-        | sed "s|external-secrets.io/v1\b|${eso_ver}|g" \
-        | kubectl apply -f -
-
-    # 2. Create/patch the master omp-config ConfigMap in omp-system
-    info "Creating/updating omp-config ConfigMap in ${SESSION_NS}…"
-    local config_yml
-    config_yml=$(_base_config_yml)
-
-    kubectl create configmap omp-config \
-        --namespace="${SESSION_NS}" \
-        --from-literal="config.yml=${config_yml}" \
-        --dry-run=client -o yaml \
-        | kubectl apply -f -
-
-    echo ""
-    echo "SETUP_OK"
-    echo "  ClusterSecretStore: omp-gsm (${eso_ver})"
-    echo "  ConfigMap omp-config in ${SESSION_NS}"
-    echo ""
-    echo "  Vault:    printf '%s' \"\$VAL\" | ./administrator.sh vault-add shared/my-key"
-    echo "  Tune:     ./administrator.sh tune [--memory] [--thinking]"
-    echo "  Sessions: see the manager skill for direct kubectl session management"
-}
-
-cmd_tune() {
-    local do_memory=false do_thinking=false
-    if [[ $# -eq 0 ]]; then
-        do_memory=true; do_thinking=true
-    fi
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --memory)   do_memory=true; shift ;;
-            --thinking) do_thinking=true; shift ;;
-            *) die "Unknown tune option: $1 (use --memory and/or --thinking)" ;;
-        esac
-    done
-
-    require_cluster
-
-    # Read the current config, patch it, and re-apply.
-    local current_config
-    current_config=$(kctl get configmap omp-config -n "${SESSION_NS}" \
-                     -o jsonpath='{.data.config\.yml}' 2>/dev/null || echo "")
-    [[ -n "${current_config}" ]] || current_config=$(_base_config_yml)
-
-    local patched_config="${current_config}"
-
-    if [[ "${do_memory}" == true ]]; then
-        info "Adding mnemopi long-term memory tuning…"
-        patched_config="${patched_config}
-memory:
-  backend: mnemopi
-mnemopi:
-  scoping: per-project-tagged
-  noEmbeddings: true
-  llmMode: smol
-memories:
-  minRolloutIdleHours: 6
-  maxRolloutAgeDays: 30
-  summaryInjectionTokenLimit: 5000"
-        ok "memory.backend=mnemopi"
-    fi
-
-    if [[ "${do_thinking}" == true ]]; then
-        info "Adding automatic thinking-level tuning…"
-        patched_config="${patched_config}
-defaultThinkingLevel: auto"
-        ok "defaultThinkingLevel=auto"
-    fi
-
-    kubectl create configmap omp-config \
-        --namespace="${SESSION_NS}" \
-        --from-literal="config.yml=${patched_config}" \
-        --dry-run=client -o yaml \
-        | kctl apply -f -
-
-    echo ""
-    echo "TUNE_OK"
-    echo "  Note: running pods pick up the new config on next restart."
 }
 
 cmd_vault_add() {
@@ -602,105 +177,6 @@ cmd_vault_ls() {
             --filter="labels.omp_vault=true AND labels.omp_subtree=${sublabel}" \
             --format="table(name,labels.omp_subtree)"
     fi
-}
-
-cmd_auth() {
-    # auth NAME PROVIDER [CONTAINER]
-    # Execute an interactive auth flow inside a running session pod.
-    # Credentials are stored under $HOME on the PVC and survive pod restarts.
-    #
-    # Providers:
-    #   anthropic   omp auth-broker login anthropic  (device code)
-    #   gcloud      gcloud auth login --no-browser    (device code)
-    #   aws         aws sso login --no-browser        (device code; profile prompted)
-    #   az          az login --use-device-code        (device code)
-    #   gh TOKEN    gh auth login --with-token        (token on stdin)
-    local name="${1:-}"
-    local provider="${2:-}"
-    local container="${3:-omp}"
-    [[ -n "${name}" ]]     || die "Usage: ./administrator.sh auth NAME PROVIDER [CONTAINER]"
-    [[ -n "${provider}" ]] || die "Usage: ./administrator.sh auth NAME PROVIDER [CONTAINER]"
-    require_cluster
-
-    # Derive pod namespace from session status — works for admin and team sessions.
-    # Iterates all namespaces that could hold a Session CR (omp-system + omp-team-*),
-    # avoiding unreliable cross-namespace jsonpath ?() filtering in kubectl.
-    local ns cr_ns
-    for cr_ns in $(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}' \
-                   | tr ' ' '\n' | grep -E '^omp-system$|^omp-team-'); do
-        ns=$(kubectl get session "${name}" -n "${cr_ns}" \
-             -o jsonpath='{.status.namespace}' 2>/dev/null || true)
-        [[ -n "${ns}" ]] && break
-    done
-    [[ -n "${ns}" ]] || die "Session '${name}' not found or has no status.namespace yet (still provisioning?)"
-    local kctl_exec="kubectl exec -it -n ${ns} -c ${container} omp -- bash -lc"
-
-    case "${provider}" in
-        anthropic)
-            info "Authenticating Anthropic in session '${name}' (device code — visit the URL in your browser)…"
-            kubectl exec -it -n "${ns}" -c "${container}" omp -- bash -lc \
-                'omp auth-broker login anthropic'
-            ;;
-        gcloud)
-            info "Authenticating gcloud in session '${name}' (device code — visit the URL in your browser)…"
-            kubectl exec -it -n "${ns}" -c "${container}" omp -- bash -lc \
-                'gcloud auth login --no-browser'
-            ;;
-        aws)
-            info "Authenticating AWS SSO in session '${name}' (device code — visit the URL in your browser)…"
-            info "If no SSO profile is configured yet, run: ./administrator.sh auth ${name} aws-configure"
-            kubectl exec -it -n "${ns}" -c "${container}" omp -- bash -lc \
-                'aws sso login --no-browser'
-            ;;
-        aws-configure)
-            info "Running 'aws configure sso' wizard in session '${name}'…"
-            info "NOTE: the wizard opens a browser URL — use a port-forward if your terminal can't open one."
-            kubectl exec -it -n "${ns}" -c "${container}" omp -- bash -lc \
-                'aws configure sso'
-            ;;
-        az)
-            info "Authenticating Azure CLI in session '${name}' (device code — visit the URL in your browser)…"
-            kubectl exec -it -n "${ns}" -c "${container}" omp -- bash -lc \
-                'az login --use-device-code'
-            ;;
-        gh)
-            # Read token interactively (hidden) then pipe into the pod — never appears in argv or history
-            local gh_token
-            read -rs -p "[admin] GitHub PAT (hidden): " gh_token
-            echo "" >&2
-            [[ -n "${gh_token}" ]] || die "No token entered"
-            info "Authenticating GitHub CLI in session '${name}'…"
-            printf '%s' "${gh_token}" | kubectl exec -i -n "${ns}" -c "${container}" omp -- bash -lc \
-                'gh auth login --with-token'
-            ;;
-        *)
-            die "Unknown provider '${provider}'. Valid: anthropic gcloud aws aws-configure az gh"
-            ;;
-    esac
-}
-
-cmd_port_forward() {
-    # port-forward NAME LOCAL_PORT [REMOTE_PORT]
-    # Forward a port from the session pod to localhost.
-    # Useful for browser-redirect OAuth flows (e.g. aws configure sso).
-    # Example:
-    #   Terminal 1: ./administrator.sh port-forward work 8400
-    #   Terminal 2: kubectl exec -it -n omp-session-work omp -- bash -lc \
-    #                 'aws configure sso --redirect-url http://localhost:8400/callback'
-    local name="${1:-}"
-    local local_port="${2:-}"
-    local remote_port="${3:-${local_port}}"
-    local ns cr_ns
-    for cr_ns in $(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}' \
-                   | tr ' ' '\n' | grep -E '^omp-system$|^omp-team-'); do
-        ns=$(kubectl get session "${name}" -n "${cr_ns}" \
-             -o jsonpath='{.status.namespace}' 2>/dev/null || true)
-        [[ -n "${ns}" ]] && break
-    done
-    [[ -n "${ns}" ]] || die "Session '${name}' not found or has no status.namespace yet (still provisioning?)"
-    info "Forwarding localhost:${local_port} → pod omp in ${ns}:${remote_port}"
-    info "Press Ctrl-C to stop."
-    kubectl port-forward -n "${ns}" pod/omp "${local_port}:${remote_port}"
 }
 
 cmd_session_transfer() {
@@ -951,62 +427,6 @@ cmd_team_rm() {
     ok "TEAM_RM_OK: ${team}"
 }
 
-cmd_github_pull_secret() {
-    # github-pull-secret — update the GHCR image pull secret using the gh CLI.
-    # Token is base64-encoded inside python and piped as JSON — never exposed in ps.
-    # Requires: gh auth login with read:packages scope.
-    require_cluster
-    command -v gh >/dev/null || die "'gh' CLI not found — install from https://cli.github.com"
-    gh auth status >/dev/null 2>&1 || die "gh CLI not authenticated — run: gh auth login"
-
-    local username
-    username=$(gh api user --jq .login 2>/dev/null) \
-        || die "Could not retrieve GitHub username from gh CLI"
-    [[ -n "${username}" ]] || die "gh API returned empty username"
-
-    if ! gh auth status 2>&1 | grep -q 'read:packages\|packages'; then
-        warn "Token may be missing read:packages scope."
-        warn "Run: gh auth refresh --scopes read:packages   then re-run this command."
-    fi
-
-    # Build dockerconfigjson YAML via python. Token read from gh CLI stdout and
-    # base64-encoded inside python — never stored in a shell variable or process arg.
-    export GH_PS_TOKEN="$(gh auth token 2>/dev/null)"
-    [[ -n "${GH_PS_TOKEN}" ]] || die "gh auth token returned empty — re-run: gh auth login"
-
-    _apply_pull_secret() {   # $1 = target namespace
-        GH_PS_USER="${username}" GH_PS_NS="$1" python3 - <<'PYEOF'
-import base64, json, os
-username, ns = os.environ["GH_PS_USER"], os.environ["GH_PS_NS"]
-token = os.environ["GH_PS_TOKEN"].strip()
-auth = base64.b64encode(f"{username}:{token}".encode()).decode()
-cfg = json.dumps({"auths": {"ghcr.io": {"username": username, "auth": auth}}})
-cfg_b64 = base64.b64encode(cfg.encode()).decode()
-print(f"""apiVersion: v1
-kind: Secret
-metadata:
-  name: ghcr-pull-secret
-  namespace: {ns}
-type: kubernetes.io/dockerconfigjson
-data:
-  .dockerconfigjson: {cfg_b64}""")
-PYEOF
-    }
-
-    info "Updating ghcr-pull-secret in omp-system (user: ${username})…"
-    _apply_pull_secret omp-system | kubectl apply -f -
-
-    info "Propagating to session namespaces…"
-    local updated=0
-    for ns in $(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}' \
-                | tr ' ' '\n' | grep '^omp-session-'); do
-        _apply_pull_secret "${ns}" | kubectl apply -f - >/dev/null 2>&1 && updated=$((updated + 1))
-    done
-    unset GH_PS_TOKEN
-    ok "GITHUB_PULL_SECRET_OK — user=${username}, updated omp-system + ${updated} session namespace(s)"
-    info "Pods in ImagePullBackOff will recover automatically within ~30s."
-}
-
 cmd_help() {
     sed -n '2,/^set -/p' "$0" | grep '^#' | sed 's/^# \?//'
 }
@@ -1018,19 +438,14 @@ SUBCOMMAND="${1:-help}"
 shift 2>/dev/null || true
 
 case "${SUBCOMMAND}" in
-    provision)      cmd_provision "$@" ;;
-    bootstrap)      cmd_bootstrap "$@" ;;
     credentials)    cmd_credentials "$@" ;;
     status)         cmd_status "$@" ;;
-    destroy)        cmd_destroy "$@" ;;
-    setup)          cmd_setup "$@" ;;
-    tune)           cmd_tune "$@" ;;
     vault-add)      cmd_vault_add "$@" ;;
     vault-ls)       cmd_vault_ls "$@" ;;
-    github-pull-secret) cmd_github_pull_secret "$@" ;;
     team-add)         cmd_team_add "$@" ;;
     team-ls)          cmd_team_ls "$@" ;;
     team-rm)          cmd_team_rm "$@" ;;
+    session-transfer)   cmd_session_transfer "$@" ;;
     help|--help|-h)  cmd_help ;;
     *)
         echo "Unknown subcommand: ${SUBCOMMAND}" >&2

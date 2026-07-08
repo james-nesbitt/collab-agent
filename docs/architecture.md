@@ -29,7 +29,7 @@ multi-tenant cluster access (single admin account).
 
 | Role | Surface | Owns |
 | --- | --- | --- |
-| **Administrator** | `administrator.sh` | GKE cluster lifecycle (provision, bootstrap, credentials, status, destroy); platform setup (`setup`, `tune`); credential vault (`vault-add`, `vault-ls`). |
+| **Administrator** | `terraform` (`infra/`) + `administrator.sh` | Cluster lifecycle via Terraform (`cd infra && terraform apply` / `terraform destroy`); config / tuning via `infra/terraform.tfvars`; `administrator.sh credentials` / `status`; credential vault (`vault-add`, `vault-ls`); teams (`team-add` / `team-ls` / `team-rm`). |
 | **Manager** | `administrator.sh` + `kubectl` | Session lifecycle via `kubectl` (apply/delete/exec Session CRs); vault and platform config via `administrator.sh`. |
 | **Operator / joiner** | *(no script)* | Interacts only by `omp join`-ing the shared session. Behaviour governed by `RULES.md`/`AGENTS.md` and skills baked into the image. |
 
@@ -48,7 +48,6 @@ graph TB
     subgraph SYS["ns omp-system"]
       OP["Session operator (kopf)\nWI: omp-operator (secretmanager.viewer)"]
       CFG["ConfigMap omp-config"]
-      GSEC["Secret ghcr-pull-secret\nSecret omp-bootstrap-env"]
     end
     subgraph ESONS["ns external-secrets"]
       ESO["External Secrets Operator\nWI: omp-eso (secretAccessor)"]
@@ -57,7 +56,7 @@ graph TB
       ES["ExternalSecret omp-creds"] --> SEC["Secret omp-creds"]
       PVC["PVC omp-home (50 Gi)"]
       NP["NetworkPolicy: deny-all + DNS + 443-egress"]
-      POD["Pod omp\ntmux + omp\nrootless docker + podman\nuid 1000, non-privileged\nenvFrom omp-creds + omp-bootstrap-env"]
+      POD["Pod omp\ntmux + omp\nrootless docker + podman\nuid 1000, non-privileged\nenvFrom omp-creds + files /etc/omp-creds/"]
       SEC --> POD
       PVC --> POD
     end
@@ -71,9 +70,8 @@ graph TB
   ADM -->|vault-add / gcloud secrets| GSM
   POD -. "collab (outbound wss 443)" .-> RELAY
   CI["GitHub Actions\nbuild-images.yml"] -->|build + push| GHCR["ghcr.io\nomp-session / omp-operator"]
-  GHCR -. "image pull (imagePullSecret: ghcr-pull-secret; interim)" .-> POD
+  GHCR -. "image pull (public)" .-> POD
   GHCR -. "image pull" .-> OP
-  GSEC -. "operator copies to session ns" .-> POD
 ```
 
 Key property: the session pod and every guest **dial out** to the relay. No inbound
@@ -91,8 +89,8 @@ firewall rule or inbound NetworkPolicy rule is needed. Manager control rides
 | External Secrets Operator (ESO) | Syncs GSM secret values into per-namespace K8s Secrets via `ClusterSecretStore omp-gsm` (Workload Identity). Refreshes hourly. | GSM API → K8s Secret API |
 | GCP Secret Manager | At-rest credential store. Entries labelled `omp_vault=true`, `omp_subtree=<subtree>`. ESO's WI SA is the only accessor. | HTTPS |
 | PVC `omp-home` (50 Gi, `standard-rwo`) | Persists `$HOME`: omp OAuth tokens, `~/work`, session transcripts. Survives pod restarts; deleted when the Session CR is deleted. | GKE Persistent Disk |
-| `omp` pod | The agent host. Runs omp under tmux; rootless dockerd + podman (vfs driver, uid 1000, non-privileged). Platform assets baked at `/opt/omp/agent/`; seeded to `$HOME` each boot by the entrypoint. `envFrom`: `omp-creds`, `omp-bootstrap-env` (optional). | — |
-| ConfigMap `omp-config` | Master omp `config.yml` in `omp-system`; mounted read-only at `/etc/omp/config.yml` in every session pod. Updated by `administrator.sh setup` / `tune`. | K8s volume mount |
+| `omp` pod | The agent host. Runs omp under tmux; rootless dockerd + podman (vfs driver, uid 1000, non-privileged). Platform assets baked at `/opt/omp/agent/`; seeded to `$HOME` each boot by the entrypoint. `omp-creds` is consumed via `envFrom` (omp's own model-provider keys) and mounted as files under `/etc/omp-creds/` that agent tools read. | — |
+| ConfigMap `omp-config` | Master omp `config.yml` in `omp-system`; mounted read-only at `/etc/omp/config.yml` in every session pod. Rendered by the omp-platform Helm chart from `infra/terraform.tfvars` (e.g. `omp_config_memory` / `omp_config_thinking`); change it with `terraform apply`. | K8s volume mount |
 | collab module (in-process) | Seals session frames (AES-256-GCM), multiplexes guests, dials the relay. Identical to prior design. | outbound wss |
 | relay | Blind rendezvous. Routes opaque ciphertext; serves browser client at `/`. | wss |
 | `omp join` / web client | Guests. Render session natively; prompt/interrupt if write-capable. | wss to relay |
@@ -112,11 +110,16 @@ Design: **GSM → ESO → per-namespace K8s Secret → pod `envFrom`** + global
   (Workload Identity SA `omp-eso`, `secretmanager.secretAccessor`) syncs them into
   K8s Secret `omp-creds` in that namespace. Refresh interval: 1 h.
 - The entry path maps to the env var name: strip the subtree prefix, replace `/`
-  and `-` with `_`, uppercase. Example: `services-github-token` (subtree `services`)
-  → `GITHUB_TOKEN`.
-- The session pod's `envFrom` references `omp-creds`. The operator SA
-  (`omp-operator`, `secretmanager.viewer`) only reads metadata — never values.
-- The operator also copies two K8s Secrets from `omp-system` into each session namespace: `ghcr-pull-secret` (imagePullSecret for the session pod; interim workaround until GHCR packages are made public) and `omp-bootstrap-env` (optional; injects bootstrap model API keys such as `GEMINI_API_KEY`).
+  and `-` with `_`, uppercase. Examples: `shared/gemini-api-key` → `GEMINI_API_KEY`;
+  `users/jn/atlassian-token` (subtree `users/jn`) → `ATLASSIAN_TOKEN`.
+- The session pod consumes `omp-creds` two ways: `envFrom` for omp's own
+  model-provider keys, and files under `/etc/omp-creds/` that agent tools read via
+  `$(cat /etc/omp-creds/NAME)`. The operator SA (`omp-operator`,
+  `secretmanager.viewer`) only reads metadata — never values.
+- No pull or bootstrap Secrets are copied into session namespaces: session images are
+  public on GHCR (no pull secret), and model-provider keys such as `GEMINI_API_KEY`
+  come from `shared/gemini-api-key` in GSM, synced into `omp-creds` by ESO like any
+  other credential.
 - Global `secrets.enabled: true` (in the master ConfigMap) replaces matched env-var
   values with `#XXXX#` before any text reaches the model. `secrets.yml` carries
   value-shape regex backstops.
@@ -266,7 +269,7 @@ phase drops to `Running` during recapture and returns to `Hosting` once the link
 refreshed. The PVC persists `$HOME` (auth tokens, `~/work`) across restarts.
 Deleting the CR (`kubectl delete session NAME -n <namespace>`) fully reclaims all resources including the disk.
 
-During provisioning: `ExternalSecret` creation is skipped when `spec.subtrees` is empty (ESO rejects empty data); the operator copies `ghcr-pull-secret` and `omp-bootstrap-env` from `omp-system` into the session namespace if they are present.
+During provisioning the operator builds a per-session `omp-creds` `ExternalSecret` from the requested `spec.subtrees`; creation is skipped when `spec.subtrees` is empty (ESO rejects empty data). No pull or bootstrap Secrets are copied — session images are public and model keys arrive through the vault like any other credential.
 
 ---
 
@@ -289,13 +292,11 @@ During provisioning: `ExternalSecret` creation is skipped when `spec.subtrees` i
 
 | Command | Action |
 | --- | --- |
-| `administrator.sh provision` | create GKE cluster, GCP SAs (`omp-eso`, `omp-operator`), IAM bindings, enable APIs |
-| `administrator.sh bootstrap` | install ESO via Helm, apply `k8s/crd-session.yaml` + RBAC + operator Deployment, wait for Available |
+| `cd infra && terraform apply` | provision everything at once: GKE cluster, GCP SAs (`omp-eso`, `omp-operator`), IAM bindings, API enablement, ESO, Session CRD + RBAC, operator Deployment, `ClusterSecretStore omp-gsm`, and the master `omp-config` ConfigMap (all rendered by the omp-platform Helm chart) |
+| `cd infra && terraform destroy` | tear down the cluster and all GCP resources |
+| edit `infra/terraform.tfvars` + `terraform apply` | config / tuning (e.g. `omp_config_memory`, `omp_config_thinking`); the Helm chart re-renders `omp-config`; running pods pick up on next restart |
 | `administrator.sh credentials` | `gcloud container clusters get-credentials` (thin convenience) |
 | `administrator.sh status` | cluster describe + `kubectl get nodes` + `kubectl get sessions -A` |
-| `administrator.sh destroy` | delete cluster, GCP SAs, IAM bindings |
-| `administrator.sh setup` | apply `ClusterSecretStore omp-gsm`, create/patch master ConfigMap `omp-config` in `omp-system` |
-| `administrator.sh tune [--memory] [--thinking]` | patch `omp-config` ConfigMap with mnemopi / auto-thinking keys; running pods pick up on next restart |
 | `administrator.sh vault-add ENTRY` | insert credential into GSM (value on stdin, never echoed) |
 | `administrator.sh vault-ls [SUBTREE]` | list GSM secret names for the vault (names only, never values) |
 | `kubectl apply` (Session CR in any namespace the operator watches; `omp-system` is conventional but any namespace works) | create Session CR; operator provisions namespace + PVC + pod; wait for `status.phase=Hosting` |
@@ -335,9 +336,9 @@ During provisioning: `ExternalSecret` creation is skipped when `spec.subtrees` i
   non-metadata) — no inbound exposure; relay is a blind ciphertext router; trust
   boundary collapses to link possession.
 - **GHCR images + CI**: platform assets (rules, commands, skills, config defaults) are
-  baked into the image and updated by pushing a branch — no SSH file-upload, no
-  per-VM bootstrap script. The cluster is fully reproducible from `provision` +
-  `bootstrap`.
+  baked into the (public) image and updated by pushing a branch — no SSH file-upload,
+  no per-VM bootstrap script. The cluster is fully reproducible from `cd infra &&
+  terraform apply`.
 
 ---
 
@@ -351,15 +352,15 @@ remediation options. See plan for full rationale and migration order.
 **Targets:** W1 (stringly-typed bash tooling), W7 (manual image/tag ops), W8 (imperative GCP layer).
 
 - **GCP layer → `infra/`** (Terraform module): cluster, node pool, GCP SAs, WI bindings,
-  IAM, API enablement. `terraform apply` / `terraform destroy` replace `administrator.sh
-  provision` / `destroy` with real state — partial failures are visible in plan diffs.
+  IAM, API enablement. `terraform apply` / `terraform destroy` are the single
+  provisioning / teardown path — real state, with partial failures visible in plan diffs.
 - **Cluster layer → `charts/omp-platform/`** (Helm chart): Session CRD, operator
   Deployment + RBAC, VAP, ClusterSecretStore, master ConfigMap, team namespaces.
   All `envsubst` variables become `values.schema.json`-validated `values.yaml` keys —
   typos fail loudly instead of applying garbage.
 - **Terraform drives the chart** via `hashicorp/helm` provider (no separate `helm`
-  invocation by the admin). `setup` + `tune` become tfvars; `terraform apply` is the
-  single end-to-end operation from empty project to serving platform.
+  invocation by the admin). Cluster config and tuning become tfvars keys; `terraform
+  apply` is the single end-to-end operation from empty project to serving platform.
 - **Imperative residue → `ompctl`**: vault add/ls, cred add/ls, session
   stop/start/restart/link, auth, port-forward. Secrets stay Python variables end-to-end —
   the F3/F4 bash-heredoc injection bug class is structurally impossible.
@@ -380,10 +381,10 @@ remediation options. See plan for full rationale and migration order.
   `users/<name>` subtree.
 - Per-user namespaces (`omp-user-<name>`), `_copy_secret`, 5 CLI commands, and the
   operator's cluster-wide `secrets get/create/update/patch/delete` RBAC are deleted.
-- `omp-bootstrap-env` (Gemini API key) moves to `shared/gemini-api-key` in GSM —
+- The bootstrap model-API-key Secret is replaced by `shared/gemini-api-key` in GSM —
   a platform credential, exactly what `shared/` is for.
-- Images mirror to Artifact Registry; `ghcr-pull-secret` fan-out and PAT dependency are
-  removed (node WI pulls images, no `imagePullSecrets` in pod spec).
+- Session images are public on GHCR; the interim pull-secret fan-out and PAT
+  dependency are removed (nodes pull anonymously, no image pull secret in the pod spec).
 
 ### Option C — StatefulSet sessions + deterministic link publication
 
