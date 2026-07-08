@@ -7,22 +7,35 @@ and how to wire up specific services.
 
 ## Architecture
 
-Four injection layers, applied in order (last wins for the same key):
+Two injection layers, applied in order (later wins for the same key):
 
 ```
-GSM vault  ──→  ESO  ──→  omp-creds (per-session K8s Secret)  ──→  pod envFrom
-                                                                         ↑
-omp-bootstrap-env (omp-system K8s Secret, copied to session ns)  ──→  pod envFrom
-                                                                         ↑
-Session CR spec.env  ──────────────────────────────────────────→  pod env []
+                                            ┌─→ pod envFrom            (omp process: model-provider keys)
+GSM vault ─→ ESO ─→ omp-creds (K8s Secret) ─┤
+                                            └─→ /etc/omp-creds/ files  (agent tools: read via $(cat …))
+
+Session CR spec.env ─────────────────────────→ pod env []
 ```
+
+**Session tools read credentials from the `/etc/omp-creds/` files, not env vars** — some
+omp builds scrub credential env from tool subprocesses, so files are the version-independent
+path. See the `credential-access` skill. (omp's own model-provider keys still come via envFrom.)
 
 | Layer | Scope | Managed by | Rotation |
 |---|---|---|---|
-| `omp-creds` | per-session, per-subtree | GSM + ESO | ESO re-syncs hourly; immediate on session restart |
-| `omp-bootstrap-env` | all sessions | kubectl (omp-system) | patch secret; restart session pod |
-| `credentialSecrets` | per-session, per-user | user (kubectl/user-cred-add) | user rotates; restart pod |
+| `omp-creds` | per-session, per-subtree | GSM + ESO | ESO re-syncs hourly (or force-sync); files auto-refresh ~1 min, env vars on pod restart |
 | `spec.env` | single session | Session CR | patch CR; restart pod |
+
+Credentials live in GSM subtrees. The platform ships with two subtrees:
+- `shared/` — platform-wide keys managed by the admin (e.g. `shared/gemini-api-key`)
+- `users/<username>/` — personal keys added by each user via `ompctl cred add`
+
+A session requests its subtrees in `spec.subtrees`:
+```yaml
+spec:
+  subtrees: ["shared", "users/jnesbitt"]
+```
+ESO builds one K8s Secret (`omp-creds`) per session from all matched GSM secrets.
 
 Global obfuscation (`secrets.enabled: true` in omp-config) replaces every matched
 env-var value with `#XXXX#` before text reaches the model. Variables whose names
@@ -31,125 +44,81 @@ need a value-shape regex in `platform/secrets.yml`.
 
 ---
 
-## Multi-operator credential injection
+## Personal credential self-service
 
-Three viable approaches for sessions shared across operators with different
-credential identities.
+Each user manages their own credentials in GSM under `users/<username>/`.
+No admin involvement after initial cluster onboarding — users add and rotate
+their own secrets independently.
 
-### Approach A — User credential namespaces (recommended)
+### Adding personal credentials
 
-Each user owns an `omp-user-<name>` namespace. Secrets are created there by the user
-(no admin involvement after initial `user-add`). Sessions reference them by name;
-the operator copies them into the session pod namespace at provision time.
+**Prerequisites:** `ompctl` needs `gcloud` + `kubectl` on PATH and the Python libs
+`google-cloud-secret-manager` and `kubernetes` (`pip install google-cloud-secret-manager kubernetes`).
+Admins without those can use `./administrator.sh vault-add users/<name>/<key>` instead (gcloud-only).
 
 ```bash
-# Administrator: onboard the user once
-./administrator.sh user-add alice
+# Add an Atlassian API token (prompted hidden)
+GCP_PROJECT=<project-id> OMP_ESO_SA=omp-eso@<project-id>.iam.gserviceaccount.com \
+  ./ompctl cred add atlassian-token
 
-# Alice: create her own secrets (values hidden, never in process args or history)
-./administrator.sh user-cred-add atlassian ATLASSIAN_TOKEN ATLASSIAN_EMAIL
-./administrator.sh user-cred-add github-token GITHUB_TOKEN   # or: github-user-cred
+# Add a GitHub token
+GCP_PROJECT=<project-id> OMP_ESO_SA=omp-eso@<project-id>.iam.gserviceaccount.com \
+  ./ompctl cred add github-token
 
-# Manager: launch a session for Alice
-kubectl apply -f - <<EOF
-apiVersion: omp.mirantis.io/v1alpha1
-kind: Session
-metadata:
-  name: alice-work
-  namespace: omp-team-alice
-spec:
-  subtrees: ["shared"]
-  team: alice
-  credentialSecrets:
-    - alice/atlassian
-    - alice/github-token
-EOF
+# List your credentials
+GCP_PROJECT=<project-id> ./ompctl cred ls
 ```
 
-Alice's session gets `ATLASSIAN_TOKEN`, `ATLASSIAN_EMAIL`, and `GITHUB_TOKEN` from her
-naming namespace; she never sees another user's secrets.
+Or set the env vars once in your shell profile:
+```bash
+export GCP_PROJECT=<project-id>
+export OMP_ESO_SA=omp-eso@<project-id>.iam.gserviceaccount.com
+./ompctl cred add atlassian-token
+```
 
-**Rotation:** Alice runs `user-cred-add` again (idempotent). Restart the pod to pick up
-the new values (operator does not re-copy on reconcile — only at provision time).
-
-**Tradeoffs:** K8s-native, no GSM required for personal creds, user self-service,
-no admin round-trip for rotation. Provision-time copy only — live rotation requires
-a pod restart.
-
----
-
-### Approach B — Session CR spec.env overrides
-
-Operator-specific credentials are injected directly into the Session CR's
-`spec.env`. No GSM entry needed; values are stored in the CR itself (which lives
-in `omp-system` and is RBAC-governed).
+### Referencing in a Session CR
 
 ```yaml
 apiVersion: omp.mirantis.io/v1alpha1
 kind: Session
 metadata:
-  name: alice-work
+  name: jnesbitt-work
   namespace: omp-system
 spec:
-  subtrees: ["services"]
-  view: false
-  env:
-    - name: GITHUB_TOKEN
-      value: "ghp_alice_token_here"   # never do this for long-lived secrets
-    - name: AWS_ACCESS_KEY_ID
-      valueFrom:
-        secretKeyRef:
-          name: alice-aws-creds       # K8s Secret in omp-system
-          key: access-key-id
+  subtrees:
+    - shared         # platform-wide keys (GEMINI_API_KEY etc.)
+    - users/jnesbitt # personal keys (ATLASSIAN_TOKEN, GITHUB_TOKEN etc.)
 ```
 
-Using `valueFrom.secretKeyRef` (referencing a K8s Secret in `omp-system`) is
-preferable to inline `value` for anything sensitive — the value is not stored in
-the CR itself.
+The env var name is derived from the key: `atlassian-token` → `ATLASSIAN_TOKEN`,
+`github-token` → `GITHUB_TOKEN`.
 
-**Post-session credential update:** create/patch the referenced Secret, then
-restart the pod. The operator will re-read `spec.env` on the next pod start.
+**Rotation:** run `ompctl cred add <same-key>` again — a new GSM version is added.
+ESO picks it up within 1 hour (or restart the pod to apply immediately).
 
-**Tradeoffs:** fast to set up, no GSM required, per-session override is precise.
-Inline values appear in `kubectl get session -o yaml`; always use `secretKeyRef`
-for real secrets. K8s Secrets in omp-system are governed by cluster RBAC, not GSM
-IAM — no rotation audit trail.
+### Ownership enforcement
+
+A ValidatingAdmissionPolicy prevents any user from referencing another user's
+`users/<name>/` subtree in their Session CR. Platform admins and the operator SA
+are exempt.
 
 ---
 
-### Approach C — Runtime Secret patch in session namespace
+## Session CR spec.env overrides
 
-For credentials that must change after a session is already running (e.g.,
-short-lived STS tokens, rotated keys mid-session), write a new K8s Secret directly
-into the session namespace and restart the pod.
+Operator-specific credentials can be injected directly into the Session CR's
+`spec.env`. Values are stored in the CR itself (RBAC-governed in its namespace).
 
-```bash
-SESSION=alice-work
-NS="omp-session-${SESSION}"
-
-# Create or replace a credential in the session namespace
-kubectl create secret generic session-runtime-creds \
-  -n "${NS}" \
-  --from-literal=AWS_SESSION_TOKEN="$(cat)" \   # value on stdin
-  --dry-run=client -o yaml | kubectl apply -f -
-
-# Patch the pod to mount it (if not already in envFrom), then restart
-kubectl delete pod omp -n "${NS}"
-# operator restartPolicy:Always brings it back with new creds loaded
+```yaml
+spec:
+  subtrees: ["shared"]
+  env:
+    EXTRA_FLAG: "true"
 ```
 
-To add `session-runtime-creds` to the pod's `envFrom` without modifying the
-operator: the operator already includes `omp-creds` and `omp-bootstrap-env` via
-`envFrom optional=True`. A third optional Secret can be added by patching the
-operator's pod spec template or by adding it to the Session CR via `spec.env`
-`valueFrom.secretKeyRef`.
-
-**Post-session update:** overwrite the Secret (same `kubectl apply` pattern) then
-restart the pod. The new values load on the next pod start.
-
-**Tradeoffs:** immediate, no GSM or ESO dependency. The Secret lives only in the
-session namespace; deleted when the Session CR is deleted. Not appropriate for
-shared platform credentials — use the bootstrap env for those.
+For sensitive inline values prefer `spec.env` only for non-secret config. Use
+GSM subtrees for anything that needs rotation, audit history, or cross-session
+sharing.
 
 ---
 
@@ -159,14 +128,15 @@ shared platform credentials — use the bootstrap env for those.
 
 | Env var | Source | vault entry |
 |---|---|---|
-| `ATLASSIAN_EMAIL` | user K8s Secret | `user-cred-add atlassian ATLASSIAN_EMAIL` |
-| `ATLASSIAN_TOKEN` | user K8s Secret | `user-cred-add atlassian ATLASSIAN_TOKEN` |
+| `ATLASSIAN_EMAIL` | GSM `users/<name>/atlassian-email` | `ompctl cred add atlassian-email` |
+| `ATLASSIAN_TOKEN` | GSM `users/<name>/atlassian-token` | `ompctl cred add atlassian-token` |
 
 ```bash
-./administrator.sh user-cred-add atlassian ATLASSIAN_TOKEN ATLASSIAN_EMAIL
+ompctl cred add atlassian-token
+ompctl cred add atlassian-email
 ```
 
-Reference `credentialSecrets: ["<name>/atlassian"]` in the Session CR. See the
+Add `users/<your-username>` to `spec.subtrees` in the Session CR. See the
 `mirantis-services` skill for usage patterns. `ATLASSIAN_TOKEN` auto-obfuscates
 (`TOKEN` suffix); `ATLASSIAN_EMAIL` does not (add a regex to `platform/secrets.yml`
 if the value shape needs masking).
@@ -181,16 +151,19 @@ if the value shape needs masking).
 | `GH_TOKEN` | `gh` CLI (alternative) | use one, not both |
 
 ```bash
-./administrator.sh github-user-cred          # creates github-token secret in omp-user-<name>
-# or manually:
-./administrator.sh user-cred-add github-token GITHUB_TOKEN
+ompctl cred add github-token   # prompted hidden; stores under users/<you>/github-token
 ```
 
-The `gh` CLI picks up `GITHUB_TOKEN` or `GH_TOKEN` automatically — no `gh auth
-login` needed. For API calls use it inline:
+Add `users/<your-username>` to `spec.subtrees` in the Session CR.
+
+Session **tools** read credentials from files under `/etc/omp-creds/` (see the
+`credential-access` skill). Reference the file inline — for `gh` and for raw API calls:
 
 ```bash
-curl -fsS -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user
+# gh CLI (feed the token from the file for this command)
+GH_TOKEN="$(cat /etc/omp-creds/GITHUB_TOKEN)" gh api user
+# raw API
+curl -fsS -H "Authorization: Bearer $(cat /etc/omp-creds/GITHUB_TOKEN)" https://api.github.com/user
 ```
 
 **SSH-based git:** SSH keys are not env vars. Place the private key in `~/.ssh/`
@@ -204,7 +177,7 @@ session's git config (once, persists on PVC):
 
 ```bash
 git config --global credential.helper \
-  '!f() { echo "username=x-access-token"; echo "password=$GITHUB_TOKEN"; }; f'
+  '!f() { echo "username=x-access-token"; echo "password=$(cat /etc/omp-creds/GITHUB_TOKEN)"; }; f'
 ```
 
 ---
@@ -288,7 +261,7 @@ path for human operators doing one-off work.
 | Rotate a GSM vault entry | `./administrator.sh vault-add <same-entry>` (new version); ESO picks up within 1 h, or restart pod immediately |
 | Revoke a session's access | `kubectl delete session NAME -n omp-system` — namespace + PVC + all secrets GC'd |
 | Revoke a single credential from a running session | delete the GSM secret version; wait for ESO refresh or restart pod |
-| Rotate the Gemini platform key | `kubectl create secret generic omp-bootstrap-env -n omp-system --from-literal=GEMINI_API_KEY=<new> --dry-run=client -o yaml \| kubectl apply -f -`; restart running session pods |
+| Rotate the Gemini platform key | `./administrator.sh vault-add shared/gemini-api-key` (new version added to GSM); ESO picks up within 1 h or restart pods |
 | Emergency: revoke all session credentials | `kubectl delete sessions --all -n omp-system` — all session namespaces and their Secrets are GC'd by the operator |
 
 ---

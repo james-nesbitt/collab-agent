@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: omp-config-glm
+  namespace: omp-system
+data:
+  config.yml: |
+    # omp config profile: GLM5 via Ollama Cloud (OLLAMA_CLOUD_API_KEY)
+    # Model: ollama-cloud/glm-5.2 (Ollama Cloud). subtrees: ["shared"] supplies the key.
+    secrets:
+      enabled: true
+    modelRoles:
+      default: ollama-cloud/glm-5.2
+      plan: ollama-cloud/glm-5.2
+      slow: ollama-cloud/glm-5.2
+      smol: ollama-cloud/glm-5.2
+    providers:
+      tinyModel: lfm2-350m
+      memoryModel: qwen3-1.7b
+      autoThinkingModel: qwen3-1.7b
+    todo:
+      eager: always
+    search:
+      contextBefore: 1
+      contextAfter: 1
+    readLineNumbers: true
+    lsp:
+      diagnosticsOnEdit: true
+    steeringMode: all
+    checkpoint:
+      enabled: true
+    async:
+      enabled: true
+    inspect_image:
+      enabled: true
+    task:
+      isolation:
+        mode: rcopy
+        merge: patch
+        commits: ai
+      maxConcurrency: 8
+      eager: default
+    mcp:
+      discoveryMode: true
+    symbolPreset: nerd
+    hideThinkingBlock: false

@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["project", "adminAccount", "esoServiceAccount", "operatorServiceAccount"],
+  "properties": {
+    "project": {
+      "type": "string",
+      "minLength": 1,
+      "description": "GCP project ID"
+    },
+    "zone": {
+      "type": "string",
+      "description": "GCP zone (e.g. us-central1-a)"
+    },
+    "clusterName": {
+      "type": "string",
+      "description": "GKE cluster name"
+    },
+    "adminAccount": {
+      "type": "string",
+      "minLength": 1,
+      "description": "GCP account email for break-glass admin (e.g. user@domain.com)"
+    },
+    "groupDomain": {
+      "type": "string",
+      "description": "Domain for Google Groups (e.g. mirantis.com)"
+    },
+    "registry": {
+      "type": "string",
+      "description": "OCI registry base path for omp images"
+    },
+    "sessionImageTag": {
+      "type": "string",
+      "description": "Image tag for omp session image"
+    },
+    "operatorImageTag": {
+      "type": "string",
+      "description": "Image tag for omp-operator image"
+    },
+    "relay": {
+      "type": "string",
+      "description": "Collab relay URL (empty string disables)"
+    },
+    "esoServiceAccount": {
+      "type": "string",
+      "minLength": 1,
+      "description": "GCP service account email for External Secrets Operator WI binding"
+    },
+    "operatorServiceAccount": {
+      "type": "string",
+      "minLength": 1,
+      "description": "GCP service account email for omp-operator WI binding"
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "memory": {
+          "type": "boolean",
+          "description": "Enable Mnemopi memory backend in omp-config"
+        },
+        "thinking": {
+          "type": "boolean",
+          "description": "Enable defaultThinkingLevel: auto in omp-config"
+        }
+      },
+      "additionalProperties": false
+    },
+    "teams": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+      },
+      "description": "Team slugs to onboard; creates omp-team-<slug> namespace + RoleBinding"
+    }
+  }
+}

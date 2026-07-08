@@ -338,3 +338,68 @@ During provisioning: `ExternalSecret` creation is skipped when `spec.subtrees` i
   baked into the image and updated by pushing a branch — no SSH file-upload, no
   per-VM bootstrap script. The cluster is fully reproducible from `provision` +
   `bootstrap`.
+
+---
+
+## 14. Platform redesign — Options A, B, C
+
+Design review of the platform's structural weaknesses (W1–W8) and three composable
+remediation options. See plan for full rationale and migration order.
+
+### Option A — Declarative platform: Terraform + Helm + `ompctl`
+
+**Targets:** W1 (stringly-typed bash tooling), W7 (manual image/tag ops), W8 (imperative GCP layer).
+
+- **GCP layer → `infra/`** (Terraform module): cluster, node pool, GCP SAs, WI bindings,
+  IAM, API enablement. `terraform apply` / `terraform destroy` replace `administrator.sh
+  provision` / `destroy` with real state — partial failures are visible in plan diffs.
+- **Cluster layer → `charts/omp-platform/`** (Helm chart): Session CRD, operator
+  Deployment + RBAC, VAP, ClusterSecretStore, master ConfigMap, team namespaces.
+  All `envsubst` variables become `values.schema.json`-validated `values.yaml` keys —
+  typos fail loudly instead of applying garbage.
+- **Terraform drives the chart** via `hashicorp/helm` provider (no separate `helm`
+  invocation by the admin). `setup` + `tune` become tfvars; `terraform apply` is the
+  single end-to-end operation from empty project to serving platform.
+- **Imperative residue → `ompctl`**: vault add/ls, cred add/ls, session
+  stop/start/restart/link, auth, port-forward. Secrets stay Python variables end-to-end —
+  the F3/F4 bash-heredoc injection bug class is structurally impossible.
+- `administrator.sh` (1,269 lines), `lib/common.sh`, and all `envsubst` rendering are
+  deleted after adoption.
+
+### Option B — GSM-only credentials: ESO everywhere, zero copies
+
+**Targets:** W2 (dual credential systems), W3 (copy-based drift), root cause of F1/F2/F8.
+
+- `spec.credentialSecrets` (per-user K8s Secret copy machinery) is removed; `spec.subtrees`
+  is canonical. Personal credentials live in GSM under `users/<name>/` and are requested
+  via `subtrees: ["users/<name>"]`.
+- Self-service: users add credentials via `ompctl cred add <key>` — writes to
+  `users/<you>/<key>` in GSM; ESO distributes to `omp-creds` hourly with no reconcile
+  trigger. Rotation propagates automatically within ≤1 h.
+- VAP expression updated: `spec.subtrees` validated — users may only request their own
+  `users/<name>` subtree.
+- Per-user namespaces (`omp-user-<name>`), `_copy_secret`, 5 CLI commands, and the
+  operator's cluster-wide `secrets get/create/update/patch/delete` RBAC are deleted.
+- `omp-bootstrap-env` (Gemini API key) moves to `shared/gemini-api-key` in GSM —
+  a platform credential, exactly what `shared/` is for.
+- Images mirror to Artifact Registry; `ghcr-pull-secret` fan-out and PAT dependency are
+  removed (node WI pulls images, no `imagePullSecrets` in pod spec).
+
+### Option C — StatefulSet sessions + deterministic link publication
+
+**Targets:** W4 (bare-pod node failure), W5 (tmux scraping), W6 (imperative reconcile).
+
+- **Session Pod → StatefulSet** (`replicas=1`, named `omp` per session namespace).
+  Pod name: **`omp-0`**. Node failure auto-reschedules (fixes the W4 availability hole —
+  the §11 failure table entry "node failure → rescheduled" is now accurate for StatefulSets).
+  `spec.state: stopped` maps to `replicas: 0`; PVC is untouched.
+- **Join link → file, not tmux scrape.** omp writes
+  `~/.omp/collab-link.json` (`{"joinLink":"…","viewLink":"…","capturedAt":"…"}`) on
+  hosting start. The operator reads it with a single `exec cat` (retry-until-exists),
+  replacing the `send-keys` / `sleep 8` / `capture-pane` / grep sequence.
+  The recapture-annotation protocol disappears from the manager workflow.
+- **Server-side apply** for all child resources (kopf + `field_manager="omp-operator",
+  force=True`): upsert semantics are the default; `_create_or_skip` and hand-written
+  upsert code (F8 fix) are deleted.
+- Rename impact: manager skill exec commands and `port-forward` pod lookups use `omp-0`
+  instead of `omp`.

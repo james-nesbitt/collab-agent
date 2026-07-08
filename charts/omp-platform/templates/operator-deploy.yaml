@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omp-operator
+  namespace: omp-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: omp-operator
+  template:
+    metadata:
+      labels:
+        app: omp-operator
+    spec:
+      serviceAccountName: omp-operator
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      containers:
+        - name: operator
+          image: "{{ .Values.operatorRegistry | default .Values.registry }}/omp-operator:{{ .Values.operatorImageTag }}"
+          imagePullPolicy: Always
+          env:
+            - name: OMP_SESSION_IMAGE
+              value: "{{ .Values.registry }}/omp-session:{{ .Values.sessionImageTag }}"
+            - name: OMP_GSM_PROJECT
+              value: "{{ .Values.project }}"
+            - name: OMP_RELAY
+              value: "{{ .Values.relay }}"
+            - name: OMP_GROUP_DOMAIN
+              value: "{{ .Values.groupDomain }}"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

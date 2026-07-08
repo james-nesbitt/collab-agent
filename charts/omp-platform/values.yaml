@@ -1,0 +1,34 @@
+# GCP and cluster identity
+project: ""
+zone: ""
+clusterName: ""
+adminAccount: ""
+groupDomain: "mirantis.com"
+
+# Image settings
+registry: "ghcr.io/james-nesbitt/collab-agent"
+# operatorRegistry: base path for the omp-operator image only. Empty falls back to
+# `registry`. Set to the Artifact Registry path when running a locally-built
+# operator that isn't published to GHCR (e.g. pre-merge Option B/C fixes).
+operatorRegistry: ""
+# sessionImageTag: omp-session image tag. The image bakes omp 16.3.11 (pinned in the
+# Dockerfile), which fixes the earlier `getSuggestions` crash and speaks collab protocol
+# v3. `latest` tracks the newest CI build on the default branch; pin a specific
+# `sha-<digest>` via infra/terraform.tfvars `session_image_tag` if you need to freeze it.
+sessionImageTag: "latest"
+operatorImageTag: "latest"
+# relay: COLLAB_RELAY for session pods. Empty = omp uses its built-in default
+# relay (verified working for /collab). Set only to override with a private relay.
+relay: ""
+
+# GCP Service Accounts (filled in by Terraform helm_release values)
+esoServiceAccount: ""
+operatorServiceAccount: ""
+
+# omp-config tuning flags (appended to base config.yml)
+config:
+  memory: false
+  thinking: false
+
+# Teams to onboard (creates omp-team-<slug> namespace + ClusterSecretStore access)
+teams: []

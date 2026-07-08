@@ -59,7 +59,7 @@ RUN groupmod -n omp ubuntu && \
 RUN echo 'omp:100000:65536' >> /etc/subuid && \
     echo 'omp:100000:65536' >> /etc/subgid
 
-# ── 4. Install mise + bun + omp (as user omp) — bump to trigger rebuild: 2026-06-25 ──
+# ── 4. Install mise + bun + omp (as user omp) — bump to trigger rebuild: 2026-07-08 (pin 16.3.11 = collab v3) ──
 USER omp
 WORKDIR /home/omp
 
@@ -67,7 +67,7 @@ RUN curl -fsSL https://mise.run | sh && \
     echo 'export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"' >> "$HOME/.profile" && \
     echo 'eval "$($HOME/.local/bin/mise activate bash --shims)" 2>/dev/null || true' >> "$HOME/.profile" && \
     "$HOME/.local/bin/mise" use -g bun@latest && \
-    "$HOME/.local/bin/mise" exec bun -- bun install -g @oh-my-pi/pi-coding-agent
+    "$HOME/.local/bin/mise" exec bun -- bun install -g @oh-my-pi/pi-coding-agent@16.3.11
 
 # ── 5. vfs storage driver for podman ────────────────────────────────────────
 # Uses vfs so no /dev/fuse device or device-plugin is needed in a
@@ -87,6 +87,7 @@ COPY platform/rules/                             /opt/omp/agent/rules/
 COPY platform/commands/commit-push-pr.md         /opt/omp/agent/commands/commit-push-pr.md
 COPY platform/skills/credential-access/SKILL.md  /opt/omp/agent/skills/credential-access/SKILL.md
 COPY platform/skills/mirantis-services/SKILL.md  /opt/omp/agent/skills/mirantis-services/SKILL.md
+COPY platform/skills/credential-rotation/SKILL.md /opt/omp/agent/skills/credential-rotation/SKILL.md
 
 # Session work-tree template → /opt/omp/work-template/.omp/
 COPY session-template/.omp/config.yml  /opt/omp/work-template/.omp/config.yml

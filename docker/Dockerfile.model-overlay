@@ -1,0 +1,23 @@
+# Thin overlay over a pinned omp-session image that adds $OMP_MODEL support to the
+# entrypoint (pins the interactive TUI model via omp --model, which the mounted
+# config file cannot set). Keeps the base image's omp binary unchanged.
+#
+# Build (base tag pinned to a known-good pre-regression build):
+#   docker build -f docker/Dockerfile.model-overlay \
+#     --build-arg BASE=ghcr.io/james-nesbitt/collab-agent/omp-session:sha-<pinned> \
+#     -t europe-west1-docker.pkg.dev/tools-348616/omp/omp-session:glm-overlay .
+#
+# Retire this overlay once upstream omp is fixed and the entrypoint change ships
+# in the CI-built omp-session image.
+ARG BASE
+FROM ${BASE}
+
+# Overlay the OMP_MODEL-aware entrypoint (same file the CI image bakes).
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+
+# Override the baked agent skills with the file-based-credentials versions
+# (the base image ships env-var-based skills, which omp's tool env-scrub breaks).
+# entrypoint.sh copies /opt/omp/agent/ -> $HOME/.omp/agent/ on start.
+COPY platform/skills/credential-access/SKILL.md   /opt/omp/agent/skills/credential-access/SKILL.md
+COPY platform/skills/mirantis-services/SKILL.md   /opt/omp/agent/skills/mirantis-services/SKILL.md
+COPY platform/skills/credential-rotation/SKILL.md /opt/omp/agent/skills/credential-rotation/SKILL.md

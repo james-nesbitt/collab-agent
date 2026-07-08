@@ -1,0 +1,9 @@
+# Local Terraform state / config
+infra/terraform.tfvars
+infra/.terraform/
+*.tfstate
+*.tfstate.*
+
+# Python build artifacts
+__pycache__/
+*.pyc

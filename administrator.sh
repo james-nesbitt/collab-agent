@@ -26,17 +26,9 @@
 #                            mnemopi long-term memory (--memory) and/or automatic
 #                            thinking-level selection (--thinking). No flag = both.
 #                            New sessions pick it up; running pods on next restart.
-#   user-add <name>          Create omp-user-<name> namespace; bind <name>@<domain>
-#                            to secrets CRUD there. Users self-manage personal
-#                            credential K8s Secrets and reference them in sessions via
-#                            spec.credentialSecrets: ["<name>/<secret>"].
-#   user-rm <name>           Prompt, then delete omp-user-<name> and remove IAM.
-#   user-cred-add <secret> <KEY> [<KEY2> ...] [--user <name>]
-#                            Create/update a personal K8s Secret in omp-user-<name>
-#                            with one or more env var keys (values prompted hidden).
-#                            e.g. user-cred-add atlassian ATLASSIAN_TOKEN ATLASSIAN_EMAIL
-#   user-cred-ls [--user <name>]
-#                            List credential secrets and their key names in omp-user-<name>.
+#   Personal credentials     Store personal credentials via 'vault-add users/<name>/<key>'
+#                            (hidden prompt → GSM). Reference in sessions with
+#                            spec.subtrees: ["users/<name>"].
 #   team-add <team>          Idempotent: create omp-team-<team> namespace, Session
 #                            CRUD Role+RoleBinding for omp-team-<team>@<domain> group,
 #                            and grant roles/container.clusterViewer IAM to the group.
@@ -71,7 +63,7 @@
 #   ADMIN_GCP_ACCOUNT  (default: current gcloud account)
 #   OMP_IMAGE_TAG      (default: latest)
 #   OMP_GROUP_DOMAIN   (default: mirantis.com) — Google Workspace domain for RBAC groups
-#   SUBTREE            (default: services) — vault subtree
+#   SUBTREE            (default: shared) — vault subtree used by vault-ls when unset
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -94,7 +86,7 @@ OMP_IMAGE_TAG="${OMP_IMAGE_TAG:-latest}"
 OMP_SESSION_IMAGE_TAG="${OMP_SESSION_IMAGE_TAG:-latest}"
 OMP_GROUP_DOMAIN="${OMP_GROUP_DOMAIN:-mirantis.com}"
 
-SUBTREE="${SUBTREE:-services}"
+SUBTREE="${SUBTREE:-shared}"
 SESSION_NS="omp-system"
 
 # GCP service account emails
@@ -468,7 +460,7 @@ cmd_setup() {
     echo "  ClusterSecretStore: omp-gsm (${eso_ver})"
     echo "  ConfigMap omp-config in ${SESSION_NS}"
     echo ""
-    echo "  Vault:    printf '%s' \"\$VAL\" | ./administrator.sh vault-add services/my/key"
+    echo "  Vault:    printf '%s' \"\$VAL\" | ./administrator.sh vault-add shared/my-key"
     echo "  Tune:     ./administrator.sh tune [--memory] [--thinking]"
     echo "  Sessions: see the manager skill for direct kubectl session management"
 }
@@ -822,103 +814,6 @@ cmd_session_transfer() {
 }
 
 # ---------------------------------------------------------------------------
-# User credential namespace subcommands
-# ---------------------------------------------------------------------------
-
-cmd_user_add() {
-    # user-add <name> — create omp-user-<name> namespace; bind <name>@<domain> to
-    # secrets CRUD there so the user can self-manage personal credential K8s Secrets.
-    local username="${1:-}"
-    [[ -n "${username}" ]] || die "Usage: ./administrator.sh user-add <username>"
-    valid_team "${username}" || die "Invalid username '${username}': must be a DNS-label-safe slug (e.g. jnesbitt)"
-    require_cluster
-    local ns="omp-user-${username}"
-    local email="${username}@${OMP_GROUP_DOMAIN}"
-
-    info "Creating personal credential namespace '${ns}' for ${email}…"
-    kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: ${ns}
-  labels:
-    omp.mirantis.io/user: "${username}"
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: omp-user-creds
-  namespace: ${ns}
-rules:
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: omp-user-creds
-  namespace: ${ns}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: omp-user-creds
-subjects:
-  - kind: User
-    apiGroup: rbac.authorization.k8s.io
-    name: ${email}
-EOF
-
-    info "Granting roles/secretmanager.viewer to ${email} (vault-ls support)…"
-    gcloud projects add-iam-policy-binding "${GCP_PROJECT}" \
-        --member="user:${email}" \
-        --role="roles/secretmanager.viewer" \
-        --quiet
-
-    echo ""
-    echo "USER_ADD_OK: ${username}"
-    echo "  Namespace : ${ns}  (only ${email} has secrets CRUD here)"
-    echo ""
-    echo "  User creates personal credential secrets:"
-    echo "    kubectl create secret generic my-creds -n ${ns} \\"
-    echo "      --from-literal=ATLASSIAN_TOKEN=xxx"
-    echo ""
-    echo "  Session CR references them as:"
-    echo "    spec:"
-    echo "      credentialSecrets:"
-    echo "        - ${username}/my-creds"
-}
-
-cmd_user_rm() {
-    local username="${1:-}"
-    [[ -n "${username}" ]] || die "Usage: ./administrator.sh user-rm <username>"
-    valid_team "${username}" || die "Invalid username: ${username}"
-    require_cluster
-    local ns="omp-user-${username}"
-    local email="${username}@${OMP_GROUP_DOMAIN}"
-
-    echo ""
-    echo "WARNING: This will delete namespace '${ns}' and all secrets within it."
-    read -r -p "Type 'yes' to confirm: " confirm
-    [[ "${confirm}" == "yes" ]] || { info "Aborted."; exit 0; }
-
-    if kubectl get namespace "${ns}" >/dev/null 2>&1; then
-        info "Deleting namespace ${ns}…"
-        kubectl delete namespace "${ns}"
-    else
-        info "Namespace ${ns} not found — skipping."
-    fi
-
-    info "Removing roles/secretmanager.viewer IAM binding for ${email}…"
-    gcloud projects remove-iam-policy-binding "${GCP_PROJECT}" \
-        --member="user:${email}" \
-        --role="roles/secretmanager.viewer" \
-        --quiet || warn "IAM binding removal failed (may not exist)"
-
-    ok "USER_RM_OK: ${username}"
-}
-
-# ---------------------------------------------------------------------------
 # Team management subcommands
 # ---------------------------------------------------------------------------
 
@@ -1056,128 +951,6 @@ cmd_team_rm() {
     ok "TEAM_RM_OK: ${team}"
 }
 
-cmd_user_cred_add() {
-    # user-cred-add <secret-name> <ENV_VAR> [<ENV_VAR2> ...] [--user <name>]
-    # Create/update a K8s Secret in omp-user-<name> with one or more env var keys.
-    # Values are prompted interactively (hidden). Credentials never appear in
-    # process arguments or command substitution — piped as YAML to kubectl apply.
-    require_cluster
-
-    local username="${ADMIN_GCP_ACCOUNT%%@*}"
-    local secret_name="" keys=()
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --user) username="${2:-}"; shift 2 ;;
-            *)
-                if [[ -z "${secret_name}" ]]; then secret_name="$1"
-                else keys+=("$1")
-                fi
-                shift ;;
-        esac
-    done
-    [[ -n "${secret_name}" ]] || die "Usage: ./administrator.sh user-cred-add <secret-name> <ENV_VAR> [...] [--user <name>]"
-    [[ ${#keys[@]} -gt 0 ]] || die "Provide at least one ENV_VAR key name"
-    [[ "${secret_name}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] \
-        || die "Invalid secret name '${secret_name}' (must be a DNS-1123 label)"
-    for key in "${keys[@]}"; do
-        [[ "${key}" =~ ^[A-Z][A-Z0-9_]*$ ]] || die "Invalid env var key '${key}' (must match ^[A-Z][A-Z0-9_]*$)"
-    done
-
-    local ns="omp-user-${username}"
-    kubectl get namespace "${ns}" >/dev/null 2>&1 \
-        || die "Namespace ${ns} does not exist — run: ./administrator.sh user-add ${username}"
-
-    # Collect values (hidden) into exported env vars — never argv, never code text.
-    local -a exported=()
-    local key val
-    for key in "${keys[@]}"; do
-        read -rs -p "[admin] Value for ${key} (hidden): " val
-        echo "" >&2
-        [[ -n "${val}" ]] || die "Empty value for ${key}"
-        export "CRED_${key}=${val}"
-        exported+=("CRED_${key}")
-    done
-    val=""
-
-    info "Creating/updating secret '${secret_name}' in ${ns} (keys: ${keys[*]})…"
-    CRED_KEYS="${keys[*]}" SECRET_NAME="${secret_name}" SECRET_NS="${ns}" \
-    python3 - <<'PYEOF' | kubectl apply -f -
-import base64, os
-keys = os.environ["CRED_KEYS"].split()
-name, ns = os.environ["SECRET_NAME"], os.environ["SECRET_NS"]
-rows = "\n".join(
-    f"  {k}: {base64.b64encode(os.environ['CRED_' + k].encode()).decode()}" for k in keys
-)
-print(f"""apiVersion: v1
-kind: Secret
-metadata:
-  name: {name}
-  namespace: {ns}
-type: Opaque
-data:
-{rows}""")
-PYEOF
-    local v
-    for v in "${exported[@]}"; do unset "${v}"; done
-
-    ok "USER_CRED_ADD_OK — ${ns}/${secret_name}"
-    info "Reference in Session CR:  credentialSecrets: [\"${username}/${secret_name}\"]"
-}
-
-cmd_user_cred_ls() {
-    # user-cred-ls [--user <name>] — list credential secrets and key names in omp-user-<name>.
-    require_cluster
-    local username="${ADMIN_GCP_ACCOUNT%%@*}"
-    [[ "${1:-}" == "--user" ]] && { username="${2:-}"; } || true
-    local ns="omp-user-${username}"
-    kubectl get namespace "${ns}" >/dev/null 2>&1 \
-        || die "Namespace ${ns} does not exist — run: ./administrator.sh user-add ${username}"
-    info "Credential secrets in ${ns}:"
-    for secret in $(kubectl get secrets -n "${ns}" --field-selector type=Opaque \
-                    -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
-        local keys
-        keys=$(kubectl get secret "${secret}" -n "${ns}" \
-               -o jsonpath='{.data}' 2>/dev/null \
-               | python3 -c "import sys,json; print(', '.join(json.load(sys.stdin).keys()))" 2>/dev/null)
-        echo "  ${secret}: ${keys}"
-    done
-}
-
-cmd_github_user_cred() {
-    # github-user-cred [<username>] — create/update 'github-token' secret in omp-user-<name>
-    # from gh CLI. Token sourced via gh auth token — never passed as a process argument.
-    require_cluster
-    command -v gh >/dev/null || die "'gh' CLI not found — install from https://cli.github.com"
-    gh auth status >/dev/null 2>&1 || die "gh CLI not authenticated — run: gh auth login"
-
-    local username="${1:-${ADMIN_GCP_ACCOUNT%%@*}}"
-    local ns="omp-user-${username}"
-    kubectl get namespace "${ns}" >/dev/null 2>&1 \
-        || die "Namespace ${ns} does not exist — run: ./administrator.sh user-add ${username}"
-
-    info "Creating/updating 'github-token' secret in ${ns} from gh CLI…"
-    GH_TOKEN_VALUE="$(gh auth token 2>/dev/null)" SECRET_NS="${ns}" \
-    python3 - <<'PYEOF' | kubectl apply -f -
-import base64, os, sys
-token = os.environ.get("GH_TOKEN_VALUE", "").strip()
-if not token:
-    sys.exit("gh auth token returned empty — re-run: gh auth login")
-ns = os.environ["SECRET_NS"]
-data = base64.b64encode(token.encode()).decode()
-print(f"""apiVersion: v1
-kind: Secret
-metadata:
-  name: github-token
-  namespace: {ns}
-type: Opaque
-data:
-  GITHUB_TOKEN: {data}""")
-PYEOF
-
-    ok "GITHUB_USER_CRED_OK — ${ns}/github-token"
-    info "Reference in Session CR:  credentialSecrets: [\"${username}/github-token\"]"
-}
-
 cmd_github_pull_secret() {
     # github-pull-secret — update the GHCR image pull secret using the gh CLI.
     # Token is base64-encoded inside python and piped as JSON — never exposed in ps.
@@ -1253,10 +1026,8 @@ case "${SUBCOMMAND}" in
     setup)          cmd_setup "$@" ;;
     tune)           cmd_tune "$@" ;;
     vault-add)      cmd_vault_add "$@" ;;
-    user-add)         cmd_user_add "$@" ;;
-    user-rm)          cmd_user_rm "$@" ;;
-    user-cred-add)    cmd_user_cred_add "$@" ;;
-    user-cred-ls)     cmd_user_cred_ls "$@" ;;
+    vault-ls)       cmd_vault_ls "$@" ;;
+    github-pull-secret) cmd_github_pull_secret "$@" ;;
     team-add)         cmd_team_add "$@" ;;
     team-ls)          cmd_team_ls "$@" ;;
     team-rm)          cmd_team_rm "$@" ;;

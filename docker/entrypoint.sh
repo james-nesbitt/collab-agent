@@ -77,12 +77,20 @@ cd "${WORK_DIR}"
 #      by ID regardless of cwd encoding (handles cross-path transfers).
 #   2. -c / --continue   — resume the most recent session for this cwd (normal restarts).
 #   3. fresh start       — no prior session found on PVC.
+#
+# OMP_MODEL (optional): pins the interactive TUI model, e.g. "ollama-cloud/glm-5.2".
+# The config file's modelRoles.default only governs agent/print-mode; the interactive
+# current-model is settable only via omp's --model flag, so it is injected here.
+MODEL_ARG=""
+if [[ -n "${OMP_MODEL:-}" ]]; then
+    MODEL_ARG="--model=${OMP_MODEL}"
+fi
 if [[ -n "${RESUME_SESSION_ID:-}" ]]; then
-    tmux new-session -d -s omp -x 220 -y 50 "exec omp --resume='${RESUME_SESSION_ID}' --allow-home"
+    tmux new-session -d -s omp -x 220 -y 50 "exec omp --resume='${RESUME_SESSION_ID}' --allow-home ${MODEL_ARG}"
 elif find "${HOME}/.omp/agent/sessions" -type f -name '*.jsonl' 2>/dev/null | grep -q .; then
-    tmux new-session -d -s omp -x 220 -y 50 'exec omp -c --allow-home'
+    tmux new-session -d -s omp -x 220 -y 50 "exec omp -c --allow-home ${MODEL_ARG}"
 else
-    tmux new-session -d -s omp -x 220 -y 50 'exec omp --allow-home'
+    tmux new-session -d -s omp -x 220 -y 50 "exec omp --allow-home ${MODEL_ARG}"
 fi
 
 # ── Auto-dismiss the first-run setup wizard ───────────────────────────────────

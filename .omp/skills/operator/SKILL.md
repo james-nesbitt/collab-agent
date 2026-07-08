@@ -38,10 +38,12 @@ control agents.
 ## Rules you work under (loaded automatically by the session)
 
 - **Never make the agent print a credential.** Don't ask it to `echo`/`cat`/`printenv` a
-  token/key/password. Credentials are already in the pod env — the right use is *inline*
-  in the command that needs it (e.g. `curl -H "Authorization: Bearer $GITHUB_TOKEN" …`).
+  token/key/password. Credentials are delivered as files under `/etc/omp-creds/` — the
+  right use is *inline* in the command that needs it (e.g.
+  `curl -H "Authorization: Bearer $(cat /etc/omp-creds/GITHUB_TOKEN)" …`).
   A printed secret lands in the on-disk transcript and on every participant's screen. To
-  see what exists, ask for env-var **names** only (the `credential-access` skill explains).
+  see what exists, ask for credential **names** only (`ls /etc/omp-creds/`; the
+  `credential-access` skill explains).
 - **Treat the join link as a secret.** Anyone with a full link can read *and steer* the
   session; a view link can read. Don't forward it.
 
@@ -57,3 +59,21 @@ control agents.
 
 For how sharing, encryption, and credential isolation work end to end, see
 `docs/architecture.md`.
+
+## Session pod naming (Option C / StatefulSet)
+
+When the platform is running Option C (StatefulSet sessions), the session pod is named
+**`omp-0`** (StatefulSet ordinal), not `omp`. This affects any `kubectl exec` or
+`kubectl logs` command targeting the session pod directly:
+
+```bash
+# StatefulSet pod name
+kubectl exec -it -n omp-session-NAME omp-0 -- bash
+kubectl logs -n omp-session-NAME omp-0
+
+# (Legacy bare-pod name — pre-Option-C)
+# kubectl exec -it -n omp-session-NAME omp -- bash
+```
+
+As a joiner this is transparent — you connect via the collab link regardless. It matters
+only if an admin or manager needs to exec directly into the pod for debugging.
