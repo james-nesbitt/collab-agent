@@ -29,8 +29,20 @@ variable "node_machine_type" {
 
 variable "node_count" {
   type        = number
-  description = "Number of nodes in the default node pool"
+  description = "Initial node count for the default node pool at creation; the autoscaler then adjusts within min/max"
   default     = 3
+}
+
+variable "min_node_count" {
+  type        = number
+  description = "Minimum nodes the autoscaler will scale the default node pool down to"
+  default     = 1
+}
+
+variable "max_node_count" {
+  type        = number
+  description = "Maximum nodes the autoscaler will scale the default node pool up to"
+  default     = 6
 }
 
 variable "admin_gcp_account" {
