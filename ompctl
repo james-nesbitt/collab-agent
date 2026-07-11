@@ -1,4 +1,12 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "kubernetes==31.0.0",
+#     "google-cloud-secret-manager==2.22.0",
+#     "grpc-google-iam-v1",
+# ]
+# ///
 """
 ompctl — omp platform self-service CLI.
 
@@ -412,8 +420,9 @@ def cmd_auth(session_name: str, provider: str, container: str = 'omp') -> None:
     ns = cr.get('status', {}).get('namespace', '')
     if not ns:
         _die(f"Session '{session_name}' has no status.namespace yet (still provisioning?)")
+    pod = cr.get('status', {}).get('podName') or 'omp-0'
 
-    base_cmd = ['kubectl', 'exec', '-it', '-n', ns, '-c', container, 'omp', '--', 'bash', '-lc']
+    base_cmd = ['kubectl', 'exec', '-it', '-n', ns, '-c', container, pod, '--', 'bash', '-lc']
 
     provider_cmds = {
         'anthropic':     'omp auth-broker login anthropic',
@@ -450,10 +459,11 @@ def cmd_port_forward(session_name: str, local_port: str, remote_port: str = '') 
     ns = cr.get('status', {}).get('namespace', '')
     if not ns:
         _die(f"Session '{session_name}' has no status.namespace yet")
+    pod = cr.get('status', {}).get('podName') or 'omp-0'
     rport = remote_port or local_port
-    _info(f'Forwarding localhost:{local_port} → pod omp in {ns}:{rport}')
+    _info(f'Forwarding localhost:{local_port} → pod {pod} in {ns}:{rport}')
     _info('Press Ctrl-C to stop.')
-    _sp.run(['kubectl', 'port-forward', '-n', ns, 'pod/omp', f'{local_port}:{rport}'], check=True)
+    _sp.run(['kubectl', 'port-forward', '-n', ns, f'pod/{pod}', f'{local_port}:{rport}'], check=True)
 
 
 
