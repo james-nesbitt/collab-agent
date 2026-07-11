@@ -52,15 +52,17 @@ Status legend: **[ ]** open · **[~]** in progress · **[x]** done.
 
 ## Infrastructure / scaling
 
-- [ ] **GKE cluster autoscaling.**
-  The node pool in `infra/terraform` is fixed-size; session pods don't scale
-  with demand. Add the cluster autoscaler (or node auto-provisioning) with
-  sensible `min`/`max` node counts, per-session CPU/memory requests so the
-  scheduler can pack and scale, and a scale-down policy. Validate interaction
-  with per-session PVC retention (nodes shouldn't scale down out from under a
-  bound PVC mid-session). Wire the knobs through `infra/terraform.tfvars` and
-  `charts/omp-platform/values.yaml`.
-  _Size: M._
+- [x] **GKE cluster autoscaling.** _(PR #20, applied 2026-07-11.)_
+  The `default` node pool now autoscales: `initial_node_count` +
+  `autoscaling { min_node_count = 1, max_node_count = 6, location_policy = "BALANCED" }`
+  plus `management { auto_repair, auto_upgrade }` in `infra/main.tf`, with
+  `min_node_count`/`max_node_count` vars. Session pods already declare resource
+  requests (main `500m`/`1Gi`, sidecar `50m`/`128Mi`), so scale-up triggers on
+  `Pending` pods and scale-down on drain; verified in-place (no node recreation).
+  Remaining if desired: surface the min/max knobs through
+  `charts/omp-platform/values.yaml` and revisit scale-down vs. PVC retention
+  under sustained load.
+  _Size: M — done._
 
 ## Images / deployment
 
