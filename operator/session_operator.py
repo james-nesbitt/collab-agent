@@ -592,13 +592,17 @@ def _tmux_capture_join_link(ns: str, view: bool = False) -> str | None:
     Returns the raw 'omp join "..."' string, or None if not found.
     """
     slash_cmd = "/collab view" if view else "/collab"
-    # One-liner: send command, wait, capture pane, grep for join token
+    # Clear any half-typed composer input and drop stale scrollback first, so the
+    # capture cannot grab a token left by a previous /collab (stale-link hardening).
     shell = (
+        "tmux send-keys -t omp Escape && sleep 1 && "
+        "tmux send-keys -t omp C-u && sleep 1 && "
+        "tmux clear-history -t omp && "
         f"tmux send-keys -t omp '{slash_cmd}' && "
         "sleep 1 && "
         "tmux send-keys -t omp Enter && "
         "sleep 8 && "
-        "tmux capture-pane -p -J -S -25 -t omp | "
+        "tmux capture-pane -p -J -S -50 -t omp | "
         "grep -oE 'omp join \"[^\"]+\"' | tail -1"
     )
     v1 = k8s.CoreV1Api()
@@ -657,6 +661,39 @@ def _read_join_link_file(ns: str, view: bool = False) -> str | None:
         ns, max_attempts,
     )
     return _tmux_capture_join_link(ns, view)
+
+
+def _ready_pod_uid(ns: str) -> str | None:
+    """Return pod 'omp-0's UID if it is Ready right now, else None."""
+    v1 = k8s.CoreV1Api()
+    try:
+        pod = v1.read_namespaced_pod("omp-0", ns)
+    except k8s.ApiException:
+        return None
+    conditions = (pod.status or k8s.V1PodStatus()).conditions or []
+    if any(c.type == "Ready" and c.status == "True" for c in conditions):
+        return pod.metadata.uid
+    return None
+
+
+def _collab_active(ns: str) -> bool:
+    """
+    Non-intrusively read omp's status line; True when a collab room is live.
+    Reads the pane only (no send-keys), so it is safe to poll on a timer.
+    """
+    v1 = k8s.CoreV1Api()
+    shell = "tmux capture-pane -p -t omp 2>/dev/null | grep -oE 'collab:[0-9]+' | tail -1"
+    try:
+        out = kubernetes.stream.stream(
+            v1.connect_get_namespaced_pod_exec, "omp-0", ns,
+            command=["sh", "-c", shell],
+            stdout=True, stderr=True, stdin=False, tty=False,
+        ) or ""
+        marker = out.strip()
+        # 'collab:1'+ = active room; 'collab:0' or absent = off
+        return bool(marker) and not marker.endswith(":0")
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -916,6 +953,62 @@ def on_recapture(spec, name, namespace, old, new, logger, **_) -> None:
                 _patch_cr_status(namespace, name, viewLink=view_link)
     else:
         logger.warning("Failed to recapture join link for session %s", name)
+
+
+# ---------------------------------------------------------------------------
+# Collab self-heal: re-host + recapture after a StatefulSet-driven restart
+# ---------------------------------------------------------------------------
+
+# Per-namespace record of the pod UID we last (re)hosted collab for, so the
+# timer acts at most once per pod instance — otherwise sessions whose omp build
+# doesn't render the 'collab:N' status indicator (older images) would look
+# perpetually "down" to _collab_active and get re-hosted on every tick.
+_last_hosted_uid: dict[str, str] = {}
+
+
+@kopf.timer(GROUP, VERSION, PLURAL, interval=60.0, initial_delay=45.0)
+def collab_healthcheck(spec, status, name, namespace, logger, **_) -> None:
+    """
+    Re-host the collab room after a pod restart.
+
+    reconcile() only captures the join link on CR events. When the StatefulSet
+    recreates omp-0 (node event, manual pod delete, autoscaler move) no CR event
+    fires, omp does not auto-re-share, and status.joinLink goes stale. This timer
+    detects a previously-hosting session whose pod restarted and re-hosts +
+    recaptures the live link exactly once per pod instance. Steady state and
+    never-shared sessions are no-ops.
+    """
+    if (spec or {}).get("state", "running") != "running":
+        return
+    status = status or {}
+    if not status.get("joinLink"):
+        return  # never hosted a link — don't force collab on
+    team = (spec or {}).get("team", "")
+    ns = status.get("namespace") or (
+        f"omp-session-{team}-{name}" if team else f"omp-session-{name}"
+    )
+    uid = _ready_pod_uid(ns)
+    if uid is None:
+        return  # pod absent or not Ready yet
+    if _last_hosted_uid.get(ns) == uid:
+        return  # already handled this pod instance
+    if _collab_active(ns):
+        _last_hosted_uid[ns] = uid  # room already live — record and skip
+        return
+    logger.info("Collab room down for %s; re-hosting after restart", name)
+    view = bool((spec or {}).get("view", False))
+    link = _tmux_capture_join_link(ns, view=view)
+    if not link:
+        logger.warning("Re-host capture failed for %s; will retry next tick", name)
+        return  # don't record uid — retry on the next tick
+    _patch_cr_status(namespace, name, phase="Hosting", joinLink=link,
+                     namespace=ns, podName="omp-0")
+    if not view:
+        view_link = _tmux_capture_join_link(ns, view=True)
+        if view_link:
+            _patch_cr_status(namespace, name, viewLink=view_link)
+    _last_hosted_uid[ns] = uid  # mark this pod instance hosted
+    logger.info("Re-hosted collab for %s: %s", name, link)
 
 
 # ---------------------------------------------------------------------------
