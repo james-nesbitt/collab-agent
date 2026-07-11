@@ -74,12 +74,15 @@ Status legend: **[ ]** open · **[~]** in progress · **[x]** done.
   `spec.image` pin.
   _Size: S._
 
-- [ ] **Repoint the live operator/session off local Artifact Registry overrides.**
-  The running operator used local AR overrides (`operator:platform-redesign`,
-  session `glm-overlay`). Drop the `operatorRegistry` override and pin to the
-  CI-published GHCR images (`latest` or digest) so the cluster runs released
-  artifacts, not local builds.
-  _Size: S._
+- [x] **Repoint the live operator off local Artifact Registry overrides.** _(applied 2026-07-11.)_
+  The operator now runs the CI-published GHCR image
+  `ghcr.io/james-nesbitt/collab-agent/omp-operator:latest` (built from `main`
+  including the self-heal fix). Removed the `operatorRegistry`/`operatorImageTag`
+  AR overrides from `infra/terraform.tfvars` (falls back to `registry` +
+  `latest`) and applied. Sessions were already on GHCR (`registry` + `sha-…`
+  pin). Remaining nicety: digest-pin `latest` for reproducibility (see the
+  security item).
+  _Size: S — done._
 
 ## ompctl
 
