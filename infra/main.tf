@@ -37,7 +37,21 @@ resource "google_container_node_pool" "default" {
   cluster  = google_container_cluster.omp.name
   location = var.zone
 
-  node_count = var.node_count
+  # Autoscaler adjusts the pool between min/max based on pending pods.
+  # initial_node_count is the size at creation only; ignore later drift so
+  # the autoscaler's steady-state count doesn't show as a perpetual diff.
+  initial_node_count = var.node_count
+
+  autoscaling {
+    min_node_count  = var.min_node_count
+    max_node_count  = var.max_node_count
+    location_policy = "BALANCED"
+  }
+
+  management {
+    auto_repair  = true
+    auto_upgrade = true
+  }
 
   node_config {
     machine_type = var.node_machine_type
@@ -46,6 +60,10 @@ resource "google_container_node_pool" "default" {
     workload_metadata_config {
       mode = "GKE_METADATA"
     }
+  }
+
+  lifecycle {
+    ignore_changes = [initial_node_count]
   }
 }
 
