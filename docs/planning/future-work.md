@@ -10,23 +10,44 @@ Status legend: **[ ]** open · **[~]** in progress · **[x]** done.
 
 ## Collab / join links
 
+> Validated by the 2026-07-11 restore test (deleted all session pods, confirmed
+> resume): conversation/data restore from the PVC is solid, but the collab-link
+> lifecycle across restarts is fragile. Three concrete gaps below.
+
+- [ ] **Re-host + recapture the join link on pod restarts.**
+  omp does **not** auto-re-share collab on `--resume`, and the operator only
+  captures the link when *it* creates the pod — `reconcile`'s guard skips
+  recapture when the StatefulSet (not the operator) recreated `omp-0`. Net: after
+  a node event / StatefulSet-driven restart, collab is off and the old room is
+  dead. Fix: have the operator detect a (re)started pod (pod watch or Ready
+  transition) and re-host (`/collab`) + recapture the link regardless of who
+  created the pod. The annotation-driven recapture path (`on_recapture`) also
+  failed to refresh in testing — make it reliably re-derive the *live* link.
+  _Size: M._
+
+- [ ] **`status.joinLink` is stale/untrustworthy after restarts.**
+  In the restore test the operator kept a **truncated, pre-restart token** in
+  `status.joinLink` while the true live room (captured from the pane and
+  browser-verified) was different. Consumers (manager skill,
+  `ompctl session link`) shouldn't trust `status.joinLink` until
+  recapture-on-restart lands. Fix ships with the item above; interim: document
+  that the pane is the source of truth. _Size: S (docs) → folds into the fix._
+
+- [ ] **`collab-link.json` is not written by the pinned omp image.**
+  The operator's primary link path (`_read_join_link_file`) reads
+  `~/.omp/collab-link.json`, but the 16.3.11 session image never writes it — so
+  the operator **always** falls back to the fragile tmux scrape, and the file
+  path is effectively dead code. Decide: adopt an omp build that emits the file
+  (with a verified `joinLink`/`viewLink` schema, guarded against drift), or make
+  the tmux path the sanctioned primary and harden it (below). _Size: S._
+
 - [ ] **Harden the tmux join-link fallback.**
   `operator/session_operator.py:_tmux_capture_join_link` greps `omp join "..."`
   from the pane and takes `tail -1`. That can grab a **stale token** left in
   scrollback by a prior `/collab view`, or the wrong read-write vs read-only
   variant. Fixes: parse by the labeled lines (`Join from another terminal:` for
   read-write, `Read-only link:` for view) instead of a blind `tail -1`; clear or
-  bound the capture window right before sending `/collab`; and prefer
-  `collab-link.json` as the sole source when present, treating tmux purely as a
-  last resort.
-  _Size: S._
-
-- [ ] **Verify `collab-link.json` schema across omp versions.**
-  The file-read path (`_read_join_link_file`) assumes `joinLink` / `viewLink`
-  keys. Confirm which omp releases actually write the file and with what keys
-  (16.3.11 baseline); guard the parser so a schema drift falls back cleanly
-  rather than silently mis-populating status. Ties into the fallback hardening
-  above.
+  bound the capture window right before sending `/collab`.
   _Size: S._
 
 ## Infrastructure / scaling
