@@ -100,9 +100,15 @@ COPY session-template/.omp/config.yml  /opt/omp/work-template/.omp/config.yml
 COPY session-template/.omp/AGENTS.md   /opt/omp/work-template/.omp/AGENTS.md
 
 RUN chown -R omp:omp /opt/omp && \
-    # Compile a standalone omp binary so it survives the PVC mount shadowing /home/omp
+    # Compile a standalone omp binary so it survives the PVC mount shadowing /home/omp.
+    # --external omp-legacy-pi-modules: since 16.4.3 the CLI bundle carries a lazy
+    # `import("omp-legacy-pi-modules")` fallback for BUNDLED_PI_MODULES — a virtual
+    # module only present in omp's own official compile. A third-party `bun build`
+    # can't resolve it, so mark it external. The fallback is dead in normal operation
+    # (nothing reads the global it sets); verified via `omp models`/`--help`.
     /home/omp/.local/bin/mise exec bun -- bun build \
         --compile \
+        --external omp-legacy-pi-modules \
         --outfile /usr/local/bin/omp \
         /home/omp/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js && \
     chmod 755 /usr/local/bin/omp && \
