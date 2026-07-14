@@ -59,15 +59,21 @@ RUN groupmod -n omp ubuntu && \
 RUN echo 'omp:100000:65536' >> /etc/subuid && \
     echo 'omp:100000:65536' >> /etc/subgid
 
-# ── 4. Install mise + bun + omp (as user omp) — bump to trigger rebuild: 2026-07-08 (pin 16.3.11 = collab v3) ──
+# ── 4. Install mise + bun + omp (as user omp) ───────────────────────────────
+# OMP_VERSION is resolved to the latest published release by CI (daily build)
+# and passed via --build-arg; defaults to a known-good pin for local builds.
+# Keep this as the LAST heavy layer so a version bump only re-pulls the omp
+# layer, not the base-OS / cloud-CLI layers above.
 USER omp
 WORKDIR /home/omp
+
+ARG OMP_VERSION=16.3.11
 
 RUN curl -fsSL https://mise.run | sh && \
     echo 'export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"' >> "$HOME/.profile" && \
     echo 'eval "$($HOME/.local/bin/mise activate bash --shims)" 2>/dev/null || true' >> "$HOME/.profile" && \
     "$HOME/.local/bin/mise" use -g bun@latest && \
-    "$HOME/.local/bin/mise" exec bun -- bun install -g @oh-my-pi/pi-coding-agent@16.3.11
+    "$HOME/.local/bin/mise" exec bun -- bun install -g @oh-my-pi/pi-coding-agent@${OMP_VERSION}
 
 # ── 5. vfs storage driver for podman ────────────────────────────────────────
 # Uses vfs so no /dev/fuse device or device-plugin is needed in a
