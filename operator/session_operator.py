@@ -273,7 +273,7 @@ def _network_policies(ns: str) -> list[dict]:
 
 def _statefulset(ns: str, session_name: str, image: str, has_configmap: bool,
                  has_pull_secret: bool = False, extra_env: dict | None = None,
-                 auth_broker: bool = False, broker_token: str = "") -> dict:
+                 auth_broker: bool = False, broker_token: str = "", restart_nonce: str = "") -> dict:
     """Build a StatefulSet manifest (replicas=1) for a session pod."""
     env: list = [{"name": "OMP_SESSION_NAME", "value": session_name}]
     if OMP_RELAY:
@@ -360,7 +360,15 @@ def _statefulset(ns: str, session_name: str, image: str, has_configmap: bool,
             "replicas": 1,
             "selector": {"matchLabels": {"app": "omp", "session": session_name}},
             "template": {
-                "metadata": {"labels": {"app": "omp", "session": session_name}},
+                "metadata": {
+                    "labels": {"app": "omp", "session": session_name},
+                    # Baking the nonce into the pod TEMPLATE (not just the
+                    # StatefulSet object) means a restartedAt bump with an
+                    # unchanged image still changes the template, so the
+                    # StatefulSet controller actually rolls omp-0 instead of a
+                    # no-op replace of an identical spec.
+                    "annotations": {"omp.mirantis.io/restartedAt": restart_nonce},
+                },
                 "spec": {
                     "serviceAccountName": "omp-session",
                     **({"imagePullSecrets": [{"name": "ghcr-pull-secret"}]} if has_pull_secret else {}),
@@ -520,30 +528,6 @@ def _ensure_broker_token_secret(v1: k8s.CoreV1Api, ns: str) -> str:
 # ---------------------------------------------------------------------------
 # Pod lifecycle helpers
 # ---------------------------------------------------------------------------
-
-def _delete_pod(ns: str) -> None:
-    """Delete pod 'omp-0' in ns; ignore 404."""
-    v1 = k8s.CoreV1Api()
-    try:
-        v1.delete_namespaced_pod("omp-0", ns)
-    except k8s.ApiException as exc:
-        if exc.status != 404:
-            raise
-
-
-def _wait_pod_gone(ns: str, timeout: int = 120) -> bool:
-    """Poll until pod 'omp-0' in ns is fully deleted (404), or timeout. Returns True if gone."""
-    v1 = k8s.CoreV1Api()
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            v1.read_namespaced_pod("omp-0", ns)
-        except k8s.ApiException as exc:
-            if exc.status == 404:
-                return True
-        time.sleep(2)
-    return False
-
 
 def _pod_image(ns: str) -> str | None:
     """Return the image of pod 'omp-0' in ns, or None if the pod is absent."""
@@ -846,7 +830,7 @@ def reconcile(spec, name, namespace, status, annotations, patch, logger, **_) ->
             patch.status["authBrokerUrl"] = "http://localhost:9999"
             logger.info("Auth-broker enabled for session %s (token stored in auth-broker-token secret)", name)
         _apply_service(ns, _headless_service(ns))
-        _apply_statefulset(ns, _statefulset(ns, name, desired_image, has_cm, has_pull_secret, extra_env, auth_broker=auth_broker, broker_token=broker_token))
+        _apply_statefulset(ns, _statefulset(ns, name, desired_image, has_cm, has_pull_secret, extra_env, auth_broker=auth_broker, broker_token=broker_token, restart_nonce=restart_nonce))
         created = True
         patch.status["restartedAt"] = restart_nonce or ""
 
