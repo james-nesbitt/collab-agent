@@ -16,6 +16,8 @@ spec:
       labels:
         app: omp-relay
     spec:
+      securityContext:
+        fsGroup: 1001
       imagePullSecrets:
         - name: ghcr-pull-secret
       volumes:
