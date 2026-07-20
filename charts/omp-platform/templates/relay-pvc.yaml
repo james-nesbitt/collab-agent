@@ -1,0 +1,13 @@
+{{- if .Values.selfRelay.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: omp-relay-certs
+  namespace: omp-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+{{- end }}

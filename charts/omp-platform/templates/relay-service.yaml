@@ -1,0 +1,20 @@
+{{- if .Values.selfRelay.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: omp-relay
+  namespace: omp-system
+spec:
+  type: LoadBalancer
+  loadBalancerIP: "{{ .Values.selfRelay.staticIp }}"
+  externalTrafficPolicy: Cluster
+  selector:
+    app: omp-relay
+  ports:
+    - name: https
+      port: 443
+      targetPort: 8443
+    - name: http
+      port: 80
+      targetPort: 8080
+{{- end }}

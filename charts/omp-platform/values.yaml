@@ -32,3 +32,12 @@ config:
 
 # Teams to onboard (creates omp-team-<slug> namespace + ClusterSecretStore access)
 teams: []
+
+# selfRelay: self-hosted collab relay (Deployment+Service+PVC in omp-system),
+# opt-in via `/collab wss://<selfRelay.host>` in a session. Cluster-wide
+# default relay stays my.omp.sh regardless — this does not touch `relay` above.
+selfRelay:
+  enabled: false
+  host: ""        # "<static-ip>.sslip.io" (infra/outputs.tf relay_ip)
+  staticIp: ""     # google_compute_address.relay.address
+  email: ""        # Let's Encrypt account/expiry-notice email

@@ -1,0 +1,7 @@
+{
+  "name": "omp-relay",
+  "private": true,
+  "dependencies": {
+    "@oh-my-pi/pi-wire": "17.0.4"
+  }
+}

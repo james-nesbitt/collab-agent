@@ -107,3 +107,9 @@ resource "google_service_account_iam_member" "operator_wi" {
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project}.svc.id.goog[omp-system/omp-operator]"
 }
+
+# Relay: reserved static external IP (self-hosted collab relay, opt-in)
+resource "google_compute_address" "relay" {
+  name   = "omp-relay"
+  region = var.region
+}

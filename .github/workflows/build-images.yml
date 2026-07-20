@@ -10,6 +10,7 @@ on:
       - 'operator/**'
       - 'platform/**'
       - 'session-template/**'
+      - 'relay/**'
   schedule:
     # Daily rebuild of the session image to track new omp releases.
     - cron: '0 6 * * *'
@@ -82,6 +83,40 @@ jobs:
         with:
           context: operator
           file: operator/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  build-relay:
+    name: Build omp-relay image
+    runs-on: ubuntu-latest
+    # Relay doesn't track omp releases — skip it on the daily schedule.
+    if: github.event_name != 'schedule'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}/omp-relay
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long
+            type=semver,pattern={{version}}
+      - uses: docker/build-push-action@v6
+        with:
+          context: relay
+          file: relay/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

@@ -41,6 +41,28 @@
       "type": "string",
       "description": "Collab relay URL (empty string disables)"
     },
+    "selfRelay": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Deploy the self-hosted collab relay behind the reserved static IP"
+        },
+        "host": {
+          "type": "string",
+          "description": "Relay hostname, e.g. <static-ip>.sslip.io"
+        },
+        "staticIp": {
+          "type": "string",
+          "description": "Reserved static IP the relay Service's LoadBalancer adopts"
+        },
+        "email": {
+          "type": "string",
+          "description": "Let's Encrypt account/expiry-notice email"
+        }
+      },
+      "additionalProperties": false
+    },
     "esoServiceAccount": {
       "type": "string",
       "minLength": 1,
