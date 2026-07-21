@@ -37,6 +37,12 @@ resource "helm_release" "omp_platform" {
     sessionImageTag  = var.session_image_tag
     operatorImageTag = var.operator_image_tag
     relay            = var.relay
+    selfRelay = {
+      enabled  = var.self_relay_enabled
+      host     = "${google_compute_address.relay.address}.sslip.io"
+      staticIp = google_compute_address.relay.address
+      email    = var.self_relay_email
+    }
     esoServiceAccount      = google_service_account.eso.email
     operatorServiceAccount = google_service_account.operator.email
     config = {

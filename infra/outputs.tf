@@ -18,3 +18,8 @@ output "operator_service_account" {
   value       = google_service_account.operator.email
   description = "Operator GCP service account email"
 }
+
+output "relay_ip" {
+  value       = google_compute_address.relay.address
+  description = "Reserved static IP for the self-hosted collab relay (host: <relay_ip>.sslip.io)"
+}

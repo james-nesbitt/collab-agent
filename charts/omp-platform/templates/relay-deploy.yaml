@@ -1,0 +1,75 @@
+{{- if .Values.selfRelay.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omp-relay
+  namespace: omp-system
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: omp-relay
+  template:
+    metadata:
+      labels:
+        app: omp-relay
+    spec:
+      securityContext:
+        fsGroup: 1001
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      volumes:
+        - name: acme
+          emptyDir: {}
+        - name: certs
+          persistentVolumeClaim:
+            claimName: omp-relay-certs
+      containers:
+        - name: relay
+          image: "{{ .Values.registry }}/omp-relay:latest"
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8443
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+          volumeMounts:
+            - name: acme
+              mountPath: /acme
+            - name: certs
+              mountPath: /certs
+        - name: certbot
+          image: "{{ .Values.registry }}/omp-relay:latest"
+          command:
+            - sh
+            - -c
+            - |
+              while true; do
+                certbot certonly --webroot -w /acme -d "$RELAY_HOST" \
+                  --email "$LE_EMAIL" --agree-tos --non-interactive --keep-until-expiring \
+                  --cert-name omp-relay --config-dir /certs/le --work-dir /certs/le-work --logs-dir /certs/le-logs || true
+                if [ -f /certs/le/live/omp-relay/fullchain.pem ]; then
+                  cp /certs/le/live/omp-relay/fullchain.pem /certs/fullchain.pem
+                  cp /certs/le/live/omp-relay/privkey.pem /certs/privkey.pem
+                fi
+                sleep 43200
+              done
+          env:
+            - name: RELAY_HOST
+              value: "{{ .Values.selfRelay.host }}"
+            - name: LE_EMAIL
+              value: "{{ .Values.selfRelay.email }}"
+          volumeMounts:
+            - name: acme
+              mountPath: /acme
+            - name: certs
+              mountPath: /certs
+{{- end }}

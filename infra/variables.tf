@@ -103,3 +103,15 @@ variable "teams" {
   description = "Team slugs to onboard (creates omp-team-<slug> namespace)"
   default     = []
 }
+
+variable "self_relay_enabled" {
+  type        = bool
+  description = "Deploy the self-hosted collab relay (Deployment + Service + PVC) behind the reserved static IP"
+  default     = false
+}
+
+variable "self_relay_email" {
+  type        = string
+  description = "Let's Encrypt account/expiry-notice email for the self-hosted relay's certificate; required when self_relay_enabled is true"
+  default     = ""
+}
