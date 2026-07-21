@@ -77,9 +77,9 @@ kubectl get session my-session -n omp-team-<team> -o jsonpath='{.status.joinLink
 | Kill session (destroys namespace + PVC) | `kubectl delete session NAME -n omp-system` |
 | Stop session (keep PVC + namespace) | `ompctl session stop NAME` |
 | Start a stopped session | `ompctl session start NAME` |
-| Restart (recreate pod; keeps current image pin) | `ompctl session restart NAME` |
-| Move to latest image (clears any pin) | `ompctl session image NAME` |
-| Pin to a specific image | `ompctl session image NAME ghcr.io/james-nesbitt/collab-agent/omp-session:sha-XXXX` |
+| Restart — recreate pod, re-pulls latest `:latest` image (imagePullPolicy: Always) | `ompctl session restart NAME` |
+| Session was pinned to a specific image? Clear the pin (resume tracking latest) | `ompctl session image NAME` |
+| Pin to a specific image (freeze during rollback/incident) | `ompctl session image NAME ghcr.io/james-nesbitt/collab-agent/omp-session:sha-XXXX` |
 | Get collab join link/token | `ompctl session link NAME` (or `kubectl get session NAME -n omp-system -o jsonpath='{.status.joinLink}'`) |
 | Auth a provider in a session | `ompctl auth NAME PROVIDER` — providers: `anthropic` `gcloud` `aws` `az` `gh` |
 | Port-forward for browser OAuth | `ompctl port-forward NAME LOCAL_PORT` |
@@ -186,13 +186,15 @@ kubectl get session my-session -n omp-team-<team> -o jsonpath='{.status.joinLink
   NetworkPolicies are retained. The conversation is preserved on the PVC.
 - **Start** (`state: running`) recreates the pod and resumes the omp session via `-c`.
 - **Restart** (`ompctl session restart NAME`, bumps `restartedAt` only) recreates the
-  pod on its *current* image — pinned or default — and resumes the conversation from
-  the PVC. It does not change any image pin.
-- **Move to latest** (`ompctl session image NAME`, no image arg) clears `spec.image`
-  and bumps `restartedAt` in one patch, so the pod is recreated tracking the
-  operator's default (`OMP_SESSION_IMAGE`) image going forward.
-- **Pin to a specific image** (`ompctl session image NAME <image>`) sets `spec.image`
-  and bumps `restartedAt`, recreating the pod on that image.
+  pod. Session pods run with `imagePullPolicy: Always`, and day to day `spec.image`
+  is unset (tracking the operator's default `:latest` tag) — so a plain restart is
+  the normal way to pick up a newer omp build; it re-pulls whatever `spec.image`
+  currently resolves to.
+- **Pin / unpin an image** (`ompctl session image NAME [<image>]`) only matters once
+  a session has been explicitly pinned via `spec.image` (e.g. to freeze a version
+  during an incident). Pass `<image>` to pin; omit it to clear the pin and go back
+  to tracking latest. Either way it bumps `restartedAt` too, recreating the pod
+  immediately.
 - `kubectl delete session` is the **only** operation that destroys the PVC.
 - After restart/start/image-move the collab link rotates — re-read `status.joinLink`
   (or run `ompctl session link NAME`). If empty, bump the recapture annotation

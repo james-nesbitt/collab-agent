@@ -242,16 +242,16 @@ ompctl session stop work
 # Start: recreates the pod; conversation resumes from PVC
 ompctl session start work
 
-# Restart: recreates the pod on its CURRENT image (pinned or default) — does NOT
-# change any image pin. Use to pick up a ConfigMap change or force a fresh pull
-# of an unpinned :latest tag.
+# Restart: recreates the pod. Sessions run unpinned (spec.image unset, tracking
+# the operator's default :latest tag) with imagePullPolicy: Always, so this is
+# the normal way to pick up a newer omp build.
 ompctl session restart work
 
-# Move to latest: clears any pinned image and recreates the pod so it tracks the
-# operator's default (OMP_SESSION_IMAGE) image going forward
+# Only needed if the session was pinned to a specific image (spec.image set):
+# clear the pin and recreate the pod so it goes back to tracking latest.
 ompctl session image work
 
-# Pin to a specific image and recreate the pod
+# Pin to a specific image (e.g. freeze during an incident) and recreate the pod
 ompctl session image work ghcr.io/james-nesbitt/collab-agent/omp-session:sha-XXXX
 ```
 
@@ -266,11 +266,12 @@ kubectl patch session work -n <namespace> \
 kubectl patch session work -n <namespace> \
   --type=merge -p '{"spec":{"state":"running"}}'
 
-# Restart (annotation bump only — image pin untouched)
+# Restart (annotation bump only — the normal way to pick up a newer image,
+# since spec.image is unset by default and imagePullPolicy is Always)
 kubectl patch session work -n <namespace> \
   --type=merge -p "{\"metadata\":{\"annotations\":{\"omp.mirantis.io/restartedAt\":\"$(date +%s)\"}}}"
 
-# Move to latest (clear pin + bump annotation)
+# Clear an existing image pin (only relevant if one was set) + bump annotation
 kubectl patch session work -n <namespace> \
   --type=merge -p "{\"spec\":{\"image\":null},\"metadata\":{\"annotations\":{\"omp.mirantis.io/restartedAt\":\"$(date +%s)\"}}}"
 
