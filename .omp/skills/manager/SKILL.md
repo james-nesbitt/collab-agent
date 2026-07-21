@@ -71,19 +71,21 @@ kubectl get session my-session -n omp-team-<team> -o jsonpath='{.status.joinLink
 
 | Intent | Command |
 | --- | --- |
-| List all sessions | `kubectl get sessions -n omp-system` |
+| List all sessions (phase/state/namespace) | `kubectl get sessions -n omp-system` (or `-A` for every namespace) |
+| List all sessions with image + join status | `ompctl session list` |
 | Session status / phase | `kubectl get session NAME -n omp-system -o jsonpath='{.status.phase}'` |
 | Kill session (destroys namespace + PVC) | `kubectl delete session NAME -n omp-system` |
-| Stop session (keep PVC + namespace) | `kubectl patch session NAME -n omp-system --type=merge -p '{"spec":{"state":"stopped"}}'` |
-| Start a stopped session | `kubectl patch session NAME -n omp-system --type=merge -p '{"spec":{"state":"running"}}'` |
-| Restart (always moves to latest image) | `kubectl patch session NAME -n omp-system --type=merge -p "{\"spec\":{\"image\":null},\"metadata\":{\"annotations\":{\"omp.mirantis.io/restartedAt\":\"$(date +%s)\"}}}"` |
-| Move to a pinned image | `kubectl patch session NAME -n omp-system --type=merge -p '{"spec":{"image":"ghcr.io/james-nesbitt/collab-agent/omp-session:sha-XXXX"}}'` |
+| Stop session (keep PVC + namespace) | `ompctl session stop NAME` |
+| Start a stopped session | `ompctl session start NAME` |
+| Restart (recreate pod; keeps current image pin) | `ompctl session restart NAME` |
+| Move to latest image (clears any pin) | `ompctl session image NAME` |
+| Pin to a specific image | `ompctl session image NAME ghcr.io/james-nesbitt/collab-agent/omp-session:sha-XXXX` |
+| Get collab join link/token | `ompctl session link NAME` (or `kubectl get session NAME -n omp-system -o jsonpath='{.status.joinLink}'`) |
 | Auth a provider in a session | `ompctl auth NAME PROVIDER` — providers: `anthropic` `gcloud` `aws` `az` `gh` |
 | Port-forward for browser OAuth | `ompctl port-forward NAME LOCAL_PORT` |
 | Transfer local session to GKE pod | `./administrator.sh session-transfer NAME [LOCAL_DIR] [SESSION_ID]` |
 | Skip setup wizard in tmux | `kubectl exec -n omp-session-NAME omp-0 -- bash -lc 'tmux send-keys -t omp Escape Escape Escape'` |
 | Attach to session tmux | `kubectl exec -it -n omp-session-NAME omp-0 -- tmux attach -t omp` |
-| Get collab join link | `kubectl get session NAME -n omp-system -o jsonpath='{.status.joinLink}'` |
 | Get view-only link | `kubectl get session NAME -n omp-system -o jsonpath='{.status.viewLink}'` |
 | Trigger link re-capture | `kubectl annotate session NAME -n omp-system omp.mirantis.io/recapture=$(date +%s) --overwrite` |
 | Inspect session events | `kubectl describe session NAME -n omp-system` |
@@ -183,12 +185,18 @@ kubectl get session my-session -n omp-team-<team> -o jsonpath='{.status.joinLink
 - **Stop** (`state: stopped`) removes the pod only — namespace, PVC, secrets, and
   NetworkPolicies are retained. The conversation is preserved on the PVC.
 - **Start** (`state: running`) recreates the pod and resumes the omp session via `-c`.
-- **Restart** (combined patch: clears `spec.image` + bumps `restartedAt`) always moves
-  to the latest published image and resumes the conversation from the PVC.
-- **Image move** (`spec.image`) pins a specific digest and recreates the pod.
+- **Restart** (`ompctl session restart NAME`, bumps `restartedAt` only) recreates the
+  pod on its *current* image — pinned or default — and resumes the conversation from
+  the PVC. It does not change any image pin.
+- **Move to latest** (`ompctl session image NAME`, no image arg) clears `spec.image`
+  and bumps `restartedAt` in one patch, so the pod is recreated tracking the
+  operator's default (`OMP_SESSION_IMAGE`) image going forward.
+- **Pin to a specific image** (`ompctl session image NAME <image>`) sets `spec.image`
+  and bumps `restartedAt`, recreating the pod on that image.
 - `kubectl delete session` is the **only** operation that destroys the PVC.
-- After restart/start/image-move the collab link rotates — re-read `status.joinLink`.
-  If empty, bump the recapture annotation (`omp.mirantis.io/recapture=$(date +%s)`).
+- After restart/start/image-move the collab link rotates — re-read `status.joinLink`
+  (or run `ompctl session link NAME`). If empty, bump the recapture annotation
+  (`omp.mirantis.io/recapture=$(date +%s)`).
 - Restarting a `stopped` session is deferred: the stopped branch takes priority. Set
   `state: running` first, then bump the restart nonce if needed.
 

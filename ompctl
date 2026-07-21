@@ -15,10 +15,12 @@ Subcommands:
   cred ls        [--user <name>] [--project <id>]
   vault add <entry> [--project <id>]         (admin; entry: 'shared/<key>' or 'users/<name>/<key>')
   vault ls  [<subtree>] [--project <id>]
+  session list
   session stop    <name>
   session start   <name>
   session restart <name>
   session link    <name>
+  session image   <name> [<image>]           (omit <image> to move to latest; else pin to <image>)
   auth <session> <provider> [<container>]    (providers: anthropic gcloud aws aws-configure az gh)
   port-forward <session> <local-port> [<remote-port>]
 """
@@ -341,16 +343,20 @@ def _k8s_custom() -> object:
 GROUP, VERSION, PLURAL = 'omp.mirantis.io', 'v1alpha1', 'sessions'
 
 
-def _find_session_cr(name: str) -> tuple:
-    """Find a Session CR by name across all omp CR namespaces. Returns (cr_ns, cr)."""
+def _omp_cr_namespaces() -> list[str]:
+    """Namespaces that may hold Session CRs: omp-system + every omp-team-<team>."""
     import kubernetes as _k8s
-    custom = _k8s_custom()
     core = _k8s.client.CoreV1Api()
-    namespaces = [
+    return [
         ns.metadata.name for ns in core.list_namespace().items
         if ns.metadata.name == 'omp-system' or ns.metadata.name.startswith('omp-team-')
     ]
-    for cr_ns in namespaces:
+
+
+def _find_session_cr(name: str) -> tuple:
+    """Find a Session CR by name across all omp CR namespaces. Returns (cr_ns, cr)."""
+    custom = _k8s_custom()
+    for cr_ns in _omp_cr_namespaces():
         try:
             cr = custom.get_namespaced_custom_object(GROUP, VERSION, cr_ns, PLURAL, name)
             return cr_ns, cr
@@ -407,6 +413,60 @@ def cmd_session_link(name: str) -> None:
             print(f'view: {view_link}')
     else:
         print(f'No join link yet (phase={phase})')
+
+
+def cmd_session_list() -> None:
+    """List every Session CR across all omp CR namespaces."""
+    custom = _k8s_custom()
+    rows: list[tuple[str, str, str, str, str, str]] = []
+    for cr_ns in _omp_cr_namespaces():
+        try:
+            items = custom.list_namespaced_custom_object(GROUP, VERSION, cr_ns, PLURAL).get('items', [])
+        except Exception as exc:
+            _info(f"WARNING: could not list sessions in {cr_ns}: {exc}")
+            continue
+        for cr in items:
+            meta = cr.get('metadata', {})
+            spec = cr.get('spec', {})
+            status = cr.get('status', {})
+            rows.append((
+                meta.get('name', ''),
+                cr_ns,
+                status.get('phase', 'Unknown'),
+                spec.get('state', 'running'),
+                spec.get('image') or '(latest)',
+                'yes' if status.get('joinLink') else 'no',
+            ))
+
+    if not rows:
+        print('  (no sessions found)')
+        return
+
+    header = ('NAME', 'CR-NAMESPACE', 'PHASE', 'STATE', 'IMAGE', 'JOINABLE')
+    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(header)]
+    fmt = '  '.join(f'{{:<{w}}}' for w in widths)
+    print(fmt.format(*header))
+    for row in sorted(rows):
+        print(fmt.format(*row))
+
+
+def cmd_session_image(name: str, image: Optional[str]) -> None:
+    """Pin a session to <image>, or clear the pin (image=None) to move it to latest."""
+    import datetime
+    cr_ns, _ = _find_session_cr(name)
+    custom = _k8s_custom()
+    nonce = datetime.datetime.utcnow().isoformat()
+    custom.patch_namespaced_custom_object(
+        GROUP, VERSION, cr_ns, PLURAL, name,
+        {
+            'spec': {'image': image or None},
+            'metadata': {'annotations': {'omp.mirantis.io/restartedAt': nonce}},
+        },
+    )
+    if image:
+        _ok(f"SESSION_IMAGE {name} — pinned to {image}; pod will be recreated")
+    else:
+        _ok(f"SESSION_IMAGE {name} — pin cleared; pod will be recreated on the latest image")
 
 
 # ---------------------------------------------------------------------------
@@ -534,9 +594,12 @@ def _parse_args(argv: list[str]) -> dict:
         if len(argv) < 3:
             _usage()
         subcmd = argv[2]
+        if subcmd == "list":
+            return {"cmd": cmd, "subcmd": subcmd, "name": None, "image": None}
         if len(argv) < 4:
             _die(f"Usage: ompctl session {subcmd} <name>")
-        return {"cmd": cmd, "subcmd": subcmd, "name": argv[3]}
+        image = argv[4] if subcmd == "image" and len(argv) > 4 else None
+        return {"cmd": cmd, "subcmd": subcmd, "name": argv[3], "image": image}
 
     if cmd == "auth":
         if len(argv) < 4:
@@ -606,7 +669,9 @@ def main() -> None:
     elif cmd == "session":
         subcmd = parsed["subcmd"]
         name = parsed["name"]
-        if subcmd == "stop":
+        if subcmd == "list":
+            cmd_session_list()
+        elif subcmd == "stop":
             cmd_session_stop(name)
         elif subcmd == "start":
             cmd_session_start(name)
@@ -614,6 +679,8 @@ def main() -> None:
             cmd_session_restart(name)
         elif subcmd == "link":
             cmd_session_link(name)
+        elif subcmd == "image":
+            cmd_session_image(name, parsed["image"])
         else:
             _usage()
 
