@@ -152,10 +152,12 @@ Then request it in a Session CR: `subtrees: ["users/jnesbitt"]`.
 
 | Command | Purpose |
 | --- | --- |
+| `ompctl session list` | List every session across all namespaces (phase, state, image, join status) |
 | `ompctl session stop <name>` | Scale session StatefulSet to 0 replicas (PVC retained) |
 | `ompctl session start <name>` | Resume a stopped session (scale to 1) |
-| `ompctl session restart <name>` | Force pod re-creation via annotation bump |
-| `ompctl session link <name>` | Print current join/view links from Session CR status |
+| `ompctl session restart <name>` | Recreate the pod — re-pulls `:latest` (imagePullPolicy: Always); the normal way to pick up a newer omp build |
+| `ompctl session link <name>` | Print current join/view links (tokens) from Session CR status |
+| `ompctl session image <name> [<image>]` | Only needed if pinned: clear the pin (omit image) or pin to `<image>` |
 
 ### Auth and port-forward
 

@@ -190,10 +190,12 @@ refresh token itself expires (~30 days for Anthropic, never for GCP personal acc
 
 ```bash
 kubectl get session work -n <namespace> -o jsonpath='{.status.joinLink}'
+# or, without knowing the namespace:
+ompctl session link work
 ```
 
-This prints the join link. Hand `omp join "<link>"` to your operators
-(see the [operator guide](operator.md)). For a read-only link:
+This prints the join link (and view link, if captured). Hand `omp join "<link>"` to
+your operators (see the [operator guide](operator.md)). For a read-only link:
 
 ```bash
 kubectl get session work -n <namespace> -o jsonpath='{.status.viewLink}'
@@ -214,8 +216,11 @@ kubectl annotate session work -n <namespace> \
 # Attach to the session tmux (take the keyboard yourself)
 kubectl exec -it -n omp-session-work omp-0 -- tmux attach -t omp
 
-# List all sessions
+# List all sessions (kubectl: PHASE/STATE/NAMESPACE columns only)
 kubectl get sessions -A
+
+# List all sessions with image + join-link status (ompctl convenience wrapper)
+ompctl session list
 
 # Delete the session (operator GCs namespace + PVC)
 kubectl delete session work -n <namespace>
@@ -228,24 +233,51 @@ kubectl delete session work -n <namespace>
 
 The omp conversation is stored on the PVC under `~/.omp/agent/sessions/` and is
 resumed automatically via `omp -c` on every pod start. These operations never
-touch the PVC:
+touch the PVC. `ompctl` wraps the underlying CR patches:
 
 ```bash
 # Stop: removes the pod; namespace, PVC, secrets, NetworkPolicies stay
+ompctl session stop work
+
+# Start: recreates the pod; conversation resumes from PVC
+ompctl session start work
+
+# Restart: recreates the pod. Sessions run unpinned (spec.image unset, tracking
+# the operator's default :latest tag) with imagePullPolicy: Always, so this is
+# the normal way to pick up a newer omp build.
+ompctl session restart work
+
+# Only needed if the session was pinned to a specific image (spec.image set):
+# clear the pin and recreate the pod so it goes back to tracking latest.
+ompctl session image work
+
+# Pin to a specific image (e.g. freeze during an incident) and recreate the pod
+ompctl session image work ghcr.io/james-nesbitt/collab-agent/omp-session:sha-XXXX
+```
+
+Equivalent raw `kubectl patch` (what `ompctl` runs under the hood):
+
+```bash
+# Stop
 kubectl patch session work -n <namespace> \
   --type=merge -p '{"spec":{"state":"stopped"}}'
 
-# Start: recreates the pod; conversation resumes from PVC
+# Start
 kubectl patch session work -n <namespace> \
   --type=merge -p '{"spec":{"state":"running"}}'
 
-# Restart: always moves to latest image + preserves conversation
+# Restart (annotation bump only — the normal way to pick up a newer image,
+# since spec.image is unset by default and imagePullPolicy is Always)
+kubectl patch session work -n <namespace> \
+  --type=merge -p "{\"metadata\":{\"annotations\":{\"omp.mirantis.io/restartedAt\":\"$(date +%s)\"}}}"
+
+# Clear an existing image pin (only relevant if one was set) + bump annotation
 kubectl patch session work -n <namespace> \
   --type=merge -p "{\"spec\":{\"image\":null},\"metadata\":{\"annotations\":{\"omp.mirantis.io/restartedAt\":\"$(date +%s)\"}}}"
 
-# Move to a specific pinned image
+# Pin to a specific image
 kubectl patch session work -n <namespace> \
-  --type=merge -p '{"spec":{"image":"ghcr.io/james-nesbitt/collab-agent/omp-session:sha-XXXX"}}'
+  --type=merge -p "{\"spec\":{\"image\":\"ghcr.io/james-nesbitt/collab-agent/omp-session:sha-XXXX\"},\"metadata\":{\"annotations\":{\"omp.mirantis.io/restartedAt\":\"$(date +%s)\"}}}"
 ```
 
 After any restart/start/image-move the collab link rotates. The operator
@@ -304,9 +336,8 @@ But guests are confined to that session's credentials.
   those creds.
 - **A value isn't obfuscated.** The env-var name lacks a secret keyword — add a regex
   to `platform/secrets.yml` and re-run `terraform apply` (from `infra/`) to pick up the updated ConfigMap.
-- **Config change not picked up.** Use the restart annotation instead of deleting the
-  pod directly:
-  `kubectl annotate session NAME -n omp-system omp.mirantis.io/restartedAt=$(date +%s) --overwrite`
+- **Config change not picked up.** Recreate the pod without touching the image pin:
+  `ompctl session restart NAME` (or `kubectl annotate session NAME -n omp-system omp.mirantis.io/restartedAt=$(date +%s) --overwrite`).
 
 ## What you don't do
 
