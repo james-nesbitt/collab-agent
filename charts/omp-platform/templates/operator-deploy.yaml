@@ -27,6 +27,8 @@ spec:
               value: "{{ .Values.project }}"
             - name: OMP_RELAY
               value: "{{ .Values.relay }}"
+            - name: OMP_SELF_RELAY
+              value: "{{ if .Values.selfRelay.enabled }}{{ .Values.selfRelay.host }}{{ end }}"
             - name: OMP_GROUP_DOMAIN
               value: "{{ .Values.groupDomain }}"
           resources:
