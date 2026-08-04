@@ -64,6 +64,12 @@ function fetch(req: Request, srv: Bun.Server): Response | undefined {
 }
 
 const websocket: Bun.WebSocketHandler<SocketData> = {
+	// Disable Bun's idle-close: it fires even with automatic pings (a known
+	// Bun bug, oven-sh/bun#26554) and is uint8-capped at 255s regardless —
+	// too short for a host thinking through a long agent turn with no guest
+	// traffic. The relay has no liveness need of its own; rely on TCP/TLS
+	// keepalive and the client's own reconnect logic instead.
+	idleTimeout: 0,
 	open(ws: RelaySocket): void {
 		const { roomId, role } = ws.data;
 		if (role === "host") {
