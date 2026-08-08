@@ -473,6 +473,48 @@ def cmd_session_image(name: str, image: Optional[str]) -> None:
 # auth — interactive provider login inside session pod
 # ---------------------------------------------------------------------------
 
+# Anthropic's `omp auth-broker login anthropic` OAuth callback listener binds a
+# fixed port (confirmed by direct observation: identical redirect_uri across two
+# separate runs, http://localhost:54545/callback) - unlike a provider whose
+# preferred port falls back to a random one if busy, this one is stable enough to
+# pre-arrange a port-forward for. `auth-broker login` has no CLI flag to override
+# it (its argument parser is separate from the main `omp` command's --config).
+ANTHROPIC_OAUTH_CALLBACK_PORT = 54545
+
+
+def _background_port_forward(ns: str, pod: str, local_port: int, remote_port: int):
+    """Start a self-restarting `kubectl port-forward` in the background.
+
+    A single `kubectl port-forward` invocation can exit outright the moment any
+    connection attempt hits the local port before the pod-side target is actually
+    listening (observed live: a stray probe during startup killed the whole
+    tunnel, not just that one connection). Wrapping it in a shell retry loop
+    means an early failed attempt just gets retried a second later instead of
+    requiring the caller to restart the whole command by hand.
+
+    Returns the Popen handle; caller must terminate it (it retries forever
+    otherwise). Uses a new process group so terminating it doesn't also sends a
+    signal to this Python process.
+    """
+    import subprocess as _sp
+    return _sp.Popen(
+        ['bash', '-c',
+         f'while true; do kubectl port-forward -n {ns} pod/{pod} {local_port}:{remote_port}; sleep 1; done'],
+        stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def _stop_background_port_forward(proc) -> None:
+    import os as _os
+    import signal as _signal
+    try:
+        _os.killpg(_os.getpgid(proc.pid), _signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    proc.wait(timeout=5)
+
+
 def cmd_auth(session_name: str, provider: str, container: str = 'omp') -> None:
     """Run an interactive auth flow inside a running session pod."""
     import subprocess as _sp
@@ -502,10 +544,28 @@ def cmd_auth(session_name: str, provider: str, container: str = 'omp') -> None:
         )
         if proc.returncode != 0:
             _die(f'gh auth login failed (exit {proc.returncode})')
-    elif provider in provider_cmds:
-        _sp.run(base_cmd + [provider_cmds[provider]], check=True)
-    else:
+        return
+
+    if provider not in provider_cmds:
         _die(f"Unknown provider '{provider}'. Valid: anthropic gcloud aws aws-configure az gh")
+
+    if provider == 'anthropic':
+        # The browser's OAuth redirect targets http://localhost:<port>/callback
+        # on *this* machine, not the pod - without a tunnel it can never reach
+        # the listener the login command starts inside the pod. Pre-arrange the
+        # forward automatically since the port is fixed and known in advance
+        # (see ANTHROPIC_OAUTH_CALLBACK_PORT), matching the pattern already used
+        # for gcloud/aws-sso/az (device-code, no local callback needed at all).
+        port = ANTHROPIC_OAUTH_CALLBACK_PORT
+        _info(f'Starting background port-forward localhost:{port} -> pod for the OAuth callback...')
+        fwd = _background_port_forward(ns, pod, port, port)
+        try:
+            _sp.run(base_cmd + [provider_cmds[provider]], check=True)
+        finally:
+            _stop_background_port_forward(fwd)
+        return
+
+    _sp.run(base_cmd + [provider_cmds[provider]], check=True)
 
 
 # ---------------------------------------------------------------------------
@@ -513,8 +573,15 @@ def cmd_auth(session_name: str, provider: str, container: str = 'omp') -> None:
 # ---------------------------------------------------------------------------
 
 def cmd_port_forward(session_name: str, local_port: str, remote_port: str = '') -> None:
-    """Forward a session pod port to localhost."""
+    """Forward a session pod port to localhost.
+
+    Retries automatically if `kubectl port-forward` exits early - observed live:
+    a single connection attempt racing the pod-side target port before it starts
+    listening can kill the whole tunnel, not just that one connection. Ctrl-C is
+    the only way to stop it for good.
+    """
     import subprocess as _sp
+    import time as _time
     _, cr = _find_session_cr(session_name)
     ns = cr.get('status', {}).get('namespace', '')
     if not ns:
@@ -523,7 +590,16 @@ def cmd_port_forward(session_name: str, local_port: str, remote_port: str = '') 
     rport = remote_port or local_port
     _info(f'Forwarding localhost:{local_port} → pod {pod} in {ns}:{rport}')
     _info('Press Ctrl-C to stop.')
-    _sp.run(['kubectl', 'port-forward', '-n', ns, f'pod/{pod}', f'{local_port}:{rport}'], check=True)
+    while True:
+        try:
+            _sp.run(['kubectl', 'port-forward', '-n', ns, f'pod/{pod}', f'{local_port}:{rport}'], check=True)
+            return
+        except KeyboardInterrupt:
+            return
+        except _sp.CalledProcessError:
+            _info('port-forward exited unexpectedly (often a connection racing the target port '
+                  'before it was ready inside the pod) — retrying in 1s...')
+            _time.sleep(1)
 
 
 
