@@ -190,7 +190,7 @@ Both options are complements, not alternatives. Option A is the bootstrap path f
 
 1. **Verify CLIs are in the session image**: `gcloud`, `aws` (v2), `gh`, `az`, `omp` are all present or addable to `Dockerfile`. Currently: `gh` ✓, `omp` ✓. Need to add: `gcloud` (official apt repo), `aws` (official install script), `az` (official apt repo).
 
-2. **Document exec-based auth flows** in `docs/roles/manager.md` and `.omp/skills/manager/SKILL.md`: one block per provider with the exact `kubectl exec -it` command.
+2. **Document exec-based auth flows** in `docs/roles/manager.md` and `skills/manager/SKILL.md`: one block per provider with the exact `kubectl exec -it` command.
 
 3. **`administrator.sh auth NAME PROVIDER`** subcommand: a thin wrapper that runs `kubectl exec -it` into the right pod for the right provider — avoids the operator having to remember the namespace format. Example:
    ```bash

@@ -6,15 +6,17 @@ to install or run** — you just join.
 
 ## 1. Join the session
 
-The manager gives you a link that looks like `n8juTBiv...#...`. From any terminal with
-omp installed:
+The manager gives you a link. From any terminal with omp installed:
 
 ```bash
-omp join "n8juTBiv...#..."
+omp join "<link>"
 ```
 
-No omp? Open the browser form instead — paste the same link into `my.omp.sh/#<link>`
-and it connects with nothing to install.
+No omp? Open the browser form instead — the manager's join instructions include a
+direct browser URL (`<relay-host>/#<link>`); paste the link there and it connects
+with nothing to install. Collab traffic routes through our own self-hosted relay, not
+`my.omp.sh` — always use the exact link/URL the manager gives you rather than
+assembling one from memory.
 
 You'll drop straight into the live session: the same streaming text, tool-call cards,
 footer (cwd, model, context %, cost), and subagent hub everyone else sees. The agent,

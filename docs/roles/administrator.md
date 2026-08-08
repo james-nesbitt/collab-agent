@@ -33,6 +33,8 @@ admin_gcp_account = "jnesbitt@mirantis.com"
 group_domain      = "mirantis.com"
 omp_config_memory   = true
 omp_config_thinking = true
+self_relay_enabled = true
+self_relay_email   = "jnesbitt@mirantis.com"
 EOF
 
 # Provision everything
@@ -48,6 +50,7 @@ What it does:
 - Creates GKE cluster + node pool (3 × `e2-standard-4` Ubuntu nodes, Workload Identity)
 - Creates GCP SAs `omp-eso` (secret accessor) and `omp-operator` (metadata viewer); adds WI bindings
 - Grants `roles/container.clusterAdmin` to `admin_gcp_account`
+- Reserves a static IP and (if `self_relay_enabled`) deploys the self-hosted collab relay — see [docs/relay.md](../relay.md)
 - Installs External Secrets Operator via Helm into `external-secrets`
 - Installs the `omp-platform` Helm chart: Session CRD, RBAC, operator Deployment, VAP, ClusterSecretStore, omp-config ConfigMap, admin ClusterRoleBinding
 
@@ -164,6 +167,8 @@ All defaults are overridable via `infra/terraform.tfvars`:
 | `group_domain` | `mirantis.com` | Google Workspace domain |
 | `omp_config_memory` | `false` | Enable mnemopi memory |
 | `omp_config_thinking` | `false` | Enable auto thinking level |
+| `self_relay_enabled` | `false` | Deploy the self-hosted collab relay ([docs/relay.md](../relay.md)) — recommended `true` |
+| `self_relay_email` | `""` | Let's Encrypt account/expiry email; required when `self_relay_enabled` is true |
 | `teams` | `[]` | Team slugs to onboard |
 
 `./administrator.sh` env vars (`GCP_PROJECT`, `ZONE`, `CLUSTER_NAME`) still apply for vault/status/team operations — keep them consistent with your tfvars.

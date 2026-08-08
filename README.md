@@ -11,7 +11,9 @@ See [docs/architecture.md](docs/architecture.md) for the full picture.
 
 ```
 infra/             — Terraform: GKE cluster + IAM + ESO + operator (Helm chart)
-charts/omp-platform/ — Helm chart (operator, ESO store, omp-config ConfigMap)
+charts/omp-platform/ — Helm chart (operator, ESO store, omp-config ConfigMap, self-hosted relay)
+relay/             — self-hosted collab relay (vendored omp relay contract + TLS/certbot)
+skills/            — administrator/manager/operator SKILL.md (see AGENTS.md)
 administrator.sh   — admin CLI: vault (credentials), teams, status, credentials (kubeconfig), session-transfer
 ompctl             — self-service credential + session CLI
 lib/common.sh      — shared config + helpers (sourced)
@@ -22,7 +24,7 @@ k8s/               — CRD, RBAC, operator Deployment, ESO ClusterSecretStore
 platform/          — global agent context (baked into image)
 session-template/  — per-session .omp/ seed (baked into image)
 .github/           — CI: build + push images to GHCR
-docs/              — architecture, role guides, planning
+docs/              — architecture, relay, role guides, planning
 ```
 
 ## Quickstart
@@ -77,7 +79,9 @@ kubectl get session work -n omp-system -o jsonpath='{.status.joinLink}'  # print
 omp join "<link from collab>"
 ```
 
-No omp installed? Paste the link at `my.omp.sh`.
+No omp installed? Paste the link at the browser URL the manager gave you alongside
+it — collab routes through our self-hosted relay (see [docs/relay.md](docs/relay.md)),
+not `my.omp.sh`.
 
 ### 5. Tear down
 
@@ -100,6 +104,9 @@ environment variables tune the `administrator.sh` / `ompctl` helpers:
 | `OMP_GROUP_DOMAIN` | `mirantis.com` | Workspace domain for RBAC groups |
 
 ## Roles
+
+Agent-consumable skills: see [AGENTS.md](AGENTS.md) → [`skills/`](skills/). Long-form
+guides behind each skill:
 
 - [Administrator guide](docs/roles/administrator.md)
 - [Manager guide](docs/roles/manager.md)

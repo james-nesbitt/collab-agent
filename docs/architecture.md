@@ -1,9 +1,10 @@
 # Shared Remote Agent Machine — Architecture (GKE)
 
 Each `omp` agent session runs as an **isolated pod in its own Kubernetes namespace**,
-provisioned by a custom `Session` CRD operator on a GKE Standard cluster. Sessions
-share the same relay and collab trust model as before; isolation, credentials, and
-lifecycle are fully Kubernetes-native.
+provisioned by a custom `Session` CRD operator on a GKE Standard cluster. Collab
+traffic routes through a relay we run ourselves on the cluster (see
+[docs/relay.md](relay.md)), not the public `wss://my.omp.sh`; isolation, credentials,
+and lifecycle are fully Kubernetes-native.
 
 Sources: <https://omp.sh/docs/collab>.
 
@@ -46,8 +47,11 @@ graph TB
   GSM["GCP Secret Manager\n(the vault)"]
   subgraph GKE["GKE Standard cluster — omp-cluster\n3× Ubuntu e2-standard-4, europe-west1-b\nDataplane V2 + Workload Identity"]
     subgraph SYS["ns omp-system"]
-      OP["Session operator (kopf)\nWI: omp-operator (secretmanager.viewer)"]
-      CFG["ConfigMap omp-config"]
+      OP["Session operator (kopf)\nWI: omp-operator (secretmanager.viewer)\nOMP_SELF_RELAY set → forces explicit relay in every /collab"]
+      CFG["ConfigMap omp-config*\ncollab.relayUrl: self-hosted relay"]
+      RELAYDEP["Deployment omp-relay (replicas: 1)\nvendored room router + certbot sidecar"]
+      RELAYPVC["PVC: LE cert"]
+      RELAYPVC --> RELAYDEP
     end
     subgraph ESONS["ns external-secrets"]
       ESO["External Secrets Operator\nWI: omp-eso (secretAccessor)"]
@@ -61,7 +65,8 @@ graph TB
       PVC --> POD
     end
   end
-  RELAY["relay wss://my.omp.sh"]
+  RELAY["self-hosted relay\nwss://<static-ip>.sslip.io\nLoadBalancer → Deployment omp-relay"]
+  RELAYDEP -.->|"fronted by"| RELAY
   MGR -->|kubectl apply Session CR| OP
   OP -->|creates ns/PVC/ES/NP/Pod| SESS
   OP -->|"exec /collab → status.joinLink"| POD
@@ -92,7 +97,7 @@ firewall rule or inbound NetworkPolicy rule is needed. Manager control rides
 | `omp` pod | The agent host. Runs omp under tmux; rootless dockerd + podman (vfs driver, uid 1000, non-privileged). Platform assets baked at `/opt/omp/agent/`; seeded to `$HOME` each boot by the entrypoint. `omp-creds` is consumed via `envFrom` (omp's own model-provider keys) and mounted as files under `/etc/omp-creds/` that agent tools read. | — |
 | ConfigMap `omp-config` | Master omp `config.yml` in `omp-system`; mounted read-only at `/etc/omp/config.yml` in every session pod. Rendered by the omp-platform Helm chart from `infra/terraform.tfvars` (e.g. `omp_config_memory` / `omp_config_thinking`); change it with `terraform apply`. | K8s volume mount |
 | collab module (in-process) | Seals session frames (AES-256-GCM), multiplexes guests, dials the relay. Identical to prior design. | outbound wss |
-| relay | Blind rendezvous. Routes opaque ciphertext; serves browser client at `/`. | wss |
+| relay | Blind rendezvous. Routes opaque ciphertext; never sees plaintext. Self-hosted (Deployment `omp-relay` in `omp-system`, single replica, LoadBalancer on a reserved static IP, Let's Encrypt TLS) — the cluster-wide default via `collab.relayUrl` + operator `OMP_SELF_RELAY`, not the public `wss://my.omp.sh`. See [docs/relay.md](relay.md). | wss |
 | `omp join` / web client | Guests. Render session natively; prompt/interrupt if write-capable. | wss to relay |
 | GHCR images | `omp-session` + `omp-operator` published by `build-images.yml` on every relevant push. Source of truth for platform assets and operator code. | HTTPS pull |
 
@@ -277,7 +282,8 @@ During provisioning the operator builds a per-session `omp-creds` `ExternalSecre
 
 | Failure | Detection | Recovery |
 | --- | --- | --- |
-| relay unreachable | collab connect error event | retry with backoff; link stable across retries |
+| relay unreachable (client-side) | collab connect error event, or `TLS handshake failed` | retry with backoff; link stable across retries. See [docs/relay.md](relay.md) troubleshooting — often network-level interception of the relay hostname on the joining machine, not a relay fault |
+| relay pod down | `kubectl get pod -n omp-system -l app=omp-relay` not `2/2 Running`; `/healthz` non-200 | Deployment auto-restarts it; **never scale beyond 1 replica** (rooms are in-memory); active rooms drop on restart, guests must rejoin |
 | pod crash / OOM | K8s `restartPolicy: Always` | automatic restart; operator re-captures collab link; guests rejoin with new link |
 | operator crash | K8s Deployment restarts it | on resume, kopf `@kopf.on.resume` re-reconciles all existing Session CRs |
 | ESO sync failure | `ExternalSecret` status `SecretSyncError` | ESO retries; check GSM IAM or secret existence; `kubectl get externalsecret omp-creds -n omp-session-<name>`. Note: only applies when `spec.subtrees` is non-empty — empty subtrees skip ExternalSecret creation entirely. |
@@ -332,9 +338,11 @@ During provisioning the operator builds a per-session `omp-creds` `ExternalSecre
   (tool cards, subagent hub, footer state) and per-link permissions, not a raw
   mirrored terminal; works from a browser with nothing installed. Unchanged from the
   prior design.
-- **Relay dial-out from pod**: NetworkPolicy allows only outbound 443 (non-RFC1918,
-  non-metadata) — no inbound exposure; relay is a blind ciphertext router; trust
-  boundary collapses to link possession.
+- **Relay dial-out from pod, self-hosted**: NetworkPolicy allows only outbound 443
+  (non-RFC1918, non-metadata) — no inbound exposure; the relay is a blind ciphertext
+  router we run ourselves (not the public `wss://my.omp.sh`), so availability isn't
+  dependent on third-party infrastructure; trust boundary still collapses to link
+  possession. See [docs/relay.md](relay.md).
 - **GHCR images + CI**: platform assets (rules, commands, skills, config defaults) are
   baked into the (public) image and updated by pushing a branch — no SSH file-upload,
   no per-VM bootstrap script. The cluster is fully reproducible from `cd infra &&

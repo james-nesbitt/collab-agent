@@ -210,6 +210,17 @@ kubectl annotate session work -n <namespace> \
   omp.mirantis.io/recapture=$(date +%s) --overwrite
 ```
 
+The link's host is our self-hosted relay (`wss://<static-ip>.sslip.io`,
+[docs/relay.md](../relay.md)) — this is the cluster-wide default, not
+`wss://my.omp.sh`; no `--relay` flag or `/collab wss://…` step is needed. If a guest
+hits `TLS handshake failed`, that's very likely a network-level filter on *their*
+network intercepting the relay hostname, not a relay outage — see
+[docs/relay.md](../relay.md#troubleshooting). If they hit `protocol mismatch: host
+speaks vX, guest sent vY`, their local `omp --version` doesn't match the session
+pod's — check with `kubectl exec -n omp-session-work omp-0 -c omp -- omp --version`
+and have them match it exactly (collab protocol isn't strictly tied to semver, so
+"latest on both ends" isn't a safe assumption).
+
 ## 4. Drive, list, end
 
 ```bash
