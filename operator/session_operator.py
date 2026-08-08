@@ -32,6 +32,13 @@ OMP_SESSION_IMAGE: str = os.environ.get(
 )
 OMP_GSM_PROJECT: str = os.environ.get("OMP_GSM_PROJECT", "")
 OMP_RELAY: str = os.environ.get("OMP_RELAY", "")
+# Self-hosted collab relay host (e.g. "34.78.117.191.sslip.io"), empty when
+# the self-hosted relay is disabled. When set, every /collab the operator
+# sends targets it explicitly instead of relying on the omp client's own
+# default-relay resolution — a resumed session (`omp -c`, used on every
+# restart) restores its own prior collab-relay preference and ignores a
+# config.yml default change, so only an explicit relay argument is reliable.
+OMP_SELF_RELAY: str = os.environ.get("OMP_SELF_RELAY", "")
 OMP_GROUP_DOMAIN: str = os.environ.get("OMP_GROUP_DOMAIN", "mirantis.com")
 
 GROUP = "omp.mirantis.io"
@@ -569,13 +576,18 @@ def _tmux_capture_join_link(ns: str, view: bool = False) -> str | None:
     """
     Exec into the running omp pod and capture the collab join link.
 
-    Sends /collab (or /collab view) to the tmux session, waits for omp to
-    process it (~8 s), then captures the pane and greps for the
-    'omp join "..."' token.
+    Sends /collab (or /collab view, or /collab wss://<self-relay> when
+    OMP_SELF_RELAY is set) to the tmux session, waits for omp to process it
+    (~8 s), then captures the pane and greps for the 'omp join "..."' token.
 
     Returns the raw 'omp join "..."' string, or None if not found.
     """
-    slash_cmd = "/collab view" if view else "/collab"
+    if view:
+        slash_cmd = "/collab view"
+    elif OMP_SELF_RELAY:
+        slash_cmd = f"/collab wss://{OMP_SELF_RELAY}"
+    else:
+        slash_cmd = "/collab"
     # Clear any half-typed composer input and drop stale scrollback first, so the
     # capture cannot grab a token left by a previous /collab (stale-link hardening).
     shell = (

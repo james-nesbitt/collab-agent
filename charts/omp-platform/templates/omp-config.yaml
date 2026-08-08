@@ -40,6 +40,10 @@ data:
       eager: default
     mcp:
       discoveryMode: true
+    {{- if .Values.selfRelay.enabled }}
+    collab:
+      relayUrl: "wss://{{ .Values.selfRelay.host }}"
+    {{- end }}
     symbolPreset: nerd
     hideThinkingBlock: false
     {{- if .Values.config.memory }}

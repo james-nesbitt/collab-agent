@@ -41,5 +41,9 @@ data:
       eager: default
     mcp:
       discoveryMode: true
+    # Self-hosted relay (infra/outputs.tf relay_ip); keep in sync if the
+    # reserved static IP ever changes.
+    collab:
+      relayUrl: "wss://34.78.117.191.sslip.io"
     symbolPreset: nerd
     hideThinkingBlock: false
