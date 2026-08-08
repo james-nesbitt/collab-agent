@@ -138,13 +138,19 @@ kubectl get session my-session -n omp-team-<team> -o jsonpath='{.status.joinLink
   ```
   _Personal credentials are managed via `ompctl cred add` — see `ompctl --help`._
 
-- **If the browser-redirect OAuth can't open a browser in the pod** (e.g. `aws configure sso`):
+- **If the browser-redirect OAuth can't reach the pod** (`aws configure sso`; **not**
+  `ompctl auth NAME anthropic`, which now manages this automatically — its
+  callback port is fixed and pre-forwarded for you):
   ```bash
-  # Terminal 1
-  ompctl port-forward work 8400
-  # Terminal 2
+  # Terminal 1 — start the pod-side wizard FIRST; wait for it to print
+  # "Open this URL in your browser" before starting the tunnel. `ompctl
+  # port-forward` retries automatically if a connection races the pod-side
+  # port before it's listening, but starting the wizard first avoids the race
+  # altogether.
   kubectl exec -it -n omp-session-work omp-0 -- bash -lc \
     'aws configure sso --redirect-url http://localhost:8400/callback'
+  # Terminal 2 — once Terminal 1 is waiting on the browser
+  ompctl port-forward work 8400
   ```
 
 - **Transfer a local omp session to a GKE pod:**

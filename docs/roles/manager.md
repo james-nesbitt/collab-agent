@@ -125,7 +125,10 @@ Session credentials arrive in two ways:
   the pod. Use `ompctl auth`:
 
 ```bash
-# Anthropic — device code (visit the printed URL in your browser)
+# Anthropic — browser OAuth; ompctl automatically forwards the fixed local
+# callback port (54545) so the browser's redirect reaches the pod. Visit the
+# printed URL; if it can't complete, paste the final redirect URL/code when
+# prompted.
 ompctl auth work anthropic
 
 # GCP personal ADC — device code
@@ -153,15 +156,19 @@ to do this once per session (or when the token expires). Token lifetimes:
 | Azure | `~/.azure/` | ~90 days (refresh token) |
 | GitHub (`gh`) | `~/.config/gh/hosts.yml` | never (PAT-based) |
 
-**Browser-redirect flows** (some `aws configure sso` paths): use the port-forward
-helper so the redirect lands on your laptop's browser:
+**Browser-redirect flows** (`aws configure sso` — **not** Anthropic, which
+`ompctl auth` now handles automatically): start the pod-side wizard first and
+wait for it to print the browser URL before starting the tunnel — starting the
+forward before anything is listening on the target port is exactly the race
+`ompctl port-forward`'s automatic retry exists for, but starting the wizard
+first avoids hitting it at all:
 
 ```bash
-# Terminal 1 — forward pod port to localhost
-ompctl port-forward work 8400
-# Terminal 2 — run the wizard pointing at the forwarded port
+# Terminal 1 — start first; wait for "Open this URL in your browser"
 kubectl exec -it -n omp-session-work omp-0 -- bash -lc \
   'aws configure sso --redirect-url http://localhost:8400/callback'
+# Terminal 2 — once Terminal 1 is waiting on the browser
+ompctl port-forward work 8400
 ```
 
 ### Auth-broker sidecar (automatic token refresh)
