@@ -26,7 +26,7 @@ encoded = "-" + cwd.relative_to(HOME).replace("/", "-")
 
 | Machine | HOME | cwd | encoded |
 |---|---|---|---|
-| local | `/home/jnesbitt` | `/home/jnesbitt/prodeng-3468` | `-prodeng-3468` |
+| local | `/home/asmith` | `/home/asmith/prodeng-3468` | `-prodeng-3468` |
 | pod | `/home/omp` | `/home/omp/prodeng-3468` | `-prodeng-3468` |
 
 **They match** when the project lives directly under `$HOME` with the same name. Since the pod always uses `WORK_DIR="${HOME}/${OMP_SESSION_NAME}"` (one level under home, named after the session), a local checkout at `~/<session-name>` encodes identically. A local checkout at a deeper path (e.g. `~/Documents/Mirantis/research/my-project`) does **not** match the pod's `-my-project`.
@@ -62,7 +62,7 @@ Transferring `agent.db` carries the auth state across. Caveat: OAuth tokens are 
 **When:** Local session is at `~/<session-name>` (same as the GKE session name).
 
 ```
-local:  /home/jnesbitt/prodeng-3468  →  -prodeng-3468
+local:  /home/asmith/prodeng-3468  →  -prodeng-3468
 pod:    /home/omp/prodeng-3468        →  -prodeng-3468  ✓ same
 ```
 

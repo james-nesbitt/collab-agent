@@ -52,15 +52,17 @@ tfvars) — see [`docs/relay.md`](../../docs/relay.md).
 
 - **Add a credential:** run `vault-add ENTRY` — prompts interactively (hidden, never in history).
   Subtree conventions: `shared/<key>` for platform creds all sessions may use;
-  `users/<name>/<key>` for personal creds scoped to one user.
+  `users/<name>/<key>` for personal creds scoped to one user — `<name>` is the local
+  part of `gcloud config get-value account` (e.g. `asmith@mirantis.com` → `asmith`),
+  not a value to guess or copy from an example.
   Path becomes env var: subtree prefix stripped, `/`/`-` → `_`, uppercased.
   `shared/ollama-cloud-api-key` → `OLLAMA_CLOUD_API_KEY`.
   End names with a secret keyword (`token`, `key`, `secret`, `password`) for auto-obfuscation.
 
 - **The `mirantis-services` skill needs:**
   ```bash
-  ./administrator.sh vault-add users/jnesbitt/atlassian-email   # prompts for value
-  ./administrator.sh vault-add users/jnesbitt/atlassian-token
+  ./administrator.sh vault-add users/asmith/atlassian-email   # prompts for value
+  ./administrator.sh vault-add users/asmith/atlassian-token
   ```
 
 - **Onboard a team:** (1) Workspace admin creates `omp-team-<team>@<domain>`, nests it
@@ -145,10 +147,10 @@ Example — add a personal Atlassian token:
 
 ```bash
 GCP_PROJECT=tools-348616 ompctl cred add atlassian-token
-# prompts: Enter value for users/jnesbitt/atlassian-token (hidden):
+# prompts: Enter value for users/asmith/atlassian-token (hidden):
 ```
 
-Then request it in a Session CR: `subtrees: ["users/jnesbitt"]`.
+Then request it in a Session CR: `subtrees: ["users/asmith"]`.
 
 ### Session lifecycle
 
