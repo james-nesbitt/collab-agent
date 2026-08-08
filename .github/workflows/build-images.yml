@@ -17,8 +17,44 @@ on:
   workflow_dispatch:
 
 jobs:
+  changes:
+    name: Detect changed image paths
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Only push events have a meaningful before/after diff; schedule and
+    # workflow_dispatch always build everything the downstream jobs allow
+    # (each job's `if` treats a non-'push' event as "build regardless").
+    if: github.event_name == 'push'
+    outputs:
+      session: ${{ steps.filter.outputs.session }}
+      operator: ${{ steps.filter.outputs.operator }}
+      relay: ${{ steps.filter.outputs.relay }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            session:
+              - 'Dockerfile'
+              - 'docker/**'
+              - 'platform/**'
+              - 'session-template/**'
+            operator:
+              - 'operator/**'
+            relay:
+              - 'relay/**'
+
   build-session:
     name: Build omp-session image
+    needs: changes
+    # `always()` so this still runs on schedule/workflow_dispatch, where the
+    # `changes` job is skipped (its outputs are then empty, not 'true' — the
+    # `github.event_name != 'push'` half of the condition covers those events).
+    if: |
+      always() &&
+      (github.event_name != 'push' || needs.changes.outputs.session == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -57,9 +93,14 @@ jobs:
 
   build-operator:
     name: Build omp-operator image
-    runs-on: ubuntu-latest
+    needs: changes
     # Operator does not track the omp version — skip it on the daily schedule.
-    if: github.event_name != 'schedule'
+    # Otherwise build unless this is a push that didn't touch operator/**.
+    if: |
+      always() &&
+      github.event_name != 'schedule' &&
+      (github.event_name != 'push' || needs.changes.outputs.operator == 'true')
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -91,9 +132,14 @@ jobs:
 
   build-relay:
     name: Build omp-relay image
-    runs-on: ubuntu-latest
+    needs: changes
     # Relay doesn't track omp releases — skip it on the daily schedule.
-    if: github.event_name != 'schedule'
+    # Otherwise build unless this is a push that didn't touch relay/**.
+    if: |
+      always() &&
+      github.event_name != 'schedule' &&
+      (github.event_name != 'push' || needs.changes.outputs.relay == 'true')
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
