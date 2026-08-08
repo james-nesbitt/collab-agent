@@ -9,7 +9,12 @@ You manage sessions on the cluster directly with `kubectl`. There is no manager
 script. Platform config and vault operations are handled by `./administrator.sh`
 — see the [`administrator`](skill://administrator) skill.
 
-Full reference: read `docs/roles/manager.md`.
+Full reference: read `docs/roles/manager.md`. Collab routes through our self-hosted
+relay by default (not `my.omp.sh`) — see [`docs/relay.md`](../../docs/relay.md) for
+how it works and join-failure troubleshooting. To drive a session directly via
+`kubectl exec` + tmux instead of collab (e.g. farming out a long task without
+holding a connection open), see
+[`docs/farm-out-execution.md`](../../docs/farm-out-execution.md).
 
 ## Prerequisites
 

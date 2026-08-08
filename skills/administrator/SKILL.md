@@ -10,7 +10,9 @@ and **`./administrator.sh`** for vault, team, and status operations. Session lif
 (applying CRs, attaching, collab links) is the [`manager`](skill://manager) skill.
 Imperative pod operations (auth, port-forward, session lifecycle) use **`ompctl`**.
 
-Full reference: read `docs/roles/administrator.md`.
+Full reference: read `docs/roles/administrator.md`. `terraform apply` also
+provisions the self-hosted collab relay (`self_relay_enabled`/`self_relay_email`
+tfvars) — see [`docs/relay.md`](../../docs/relay.md).
 
 ## Preconditions
 

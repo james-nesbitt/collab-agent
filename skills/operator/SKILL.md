@@ -18,9 +18,10 @@ Full reference: read `docs/roles/operator.md`.
 omp join "<link>"        # any terminal with omp installed
 ```
 
-No omp? Paste the same link into `my.omp.sh/#<link>` — connects in the browser, nothing
-to install. You drop into the live session: same streaming text, tool-call cards, footer
-(cwd, model, context %, cost), and subagent hub everyone sees.
+No omp? Open the browser URL the manager gave you alongside the link (our self-hosted
+relay, not `my.omp.sh` — see [docs/relay.md](../../docs/relay.md)) — connects in the
+browser, nothing to install. You drop into the live session: same streaming text,
+tool-call cards, footer (cwd, model, context %, cost), and subagent hub everyone sees.
 
 ## What a joiner can / can't do
 
