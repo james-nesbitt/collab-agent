@@ -30,7 +30,7 @@ metadata:
   name: my-session
   namespace: omp-team-<team>     # must match spec.team
 spec:
-  subtrees: ["shared", "users/jnesbitt"]  # platform creds + personal creds via GSM
+  subtrees: ["shared", "users/asmith"]  # platform creds + personal creds via GSM
   team: <team>                    # operator creates omp-session-<team>-my-session
 ```
 
@@ -40,7 +40,7 @@ Add personal credentials to GSM first:
 # Add personal credentials to GSM (value prompted hidden):
 GCP_PROJECT=tools-348616 ompctl cred add atlassian-token
 GCP_PROJECT=tools-348616 ompctl cred add atlassian-email
-# Then reference in Session CR: spec.subtrees: ["users/jnesbitt"]
+# Then reference in Session CR: spec.subtrees: ["users/asmith"]
 ```
 
 Multiple secrets are supported — list them in order; later entries override earlier on env var conflict.
@@ -48,7 +48,7 @@ List available vault credential names (you have read-only access):
 
 ```bash
 ./administrator.sh vault-ls shared           # platform creds available to all sessions
-./administrator.sh vault-ls users/jnesbitt   # your personal entries
+./administrator.sh vault-ls users/asmith   # your personal entries
 ```
 
 The session pod namespace is `omp-session-<team>-<name>` (not `omp-session-<name>`).
@@ -93,8 +93,14 @@ Want a different subtree — or multiple subtrees? Adjust `spec.subtrees`:
 
 ```yaml
 spec:
-  subtrees: ["shared", "users/jnesbitt"]
+  subtrees: ["shared", "users/asmith"]
 ```
+
+`asmith` is a stand-in for the current operator's own username — Session CRs are
+hand-written YAML with no auto-scoping (unlike `ompctl cred add`, which derives it
+for you). The real value is the local part of `gcloud config get-value account`
+(`asmith@mirantis.com` → `asmith`); see
+[credential-management.md](../credential-management.md#personal-credential-self-service).
 
 Wait for the session to be ready:
 

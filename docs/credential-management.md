@@ -30,10 +30,24 @@ Credentials live in GSM subtrees. The platform ships with two subtrees:
 - `shared/` — platform-wide keys managed by the admin (e.g. `shared/gemini-api-key`)
 - `users/<username>/` — personal keys added by each user via `ompctl cred add`
 
+**Determining `<username>`:** it is the local part of your active gcloud account's
+email — `asmith@mirantis.com` → `asmith`. Get it with:
+```bash
+gcloud config get-value account   # e.g. asmith@mirantis.com — take the part before @
+```
+This is not a convention you apply by hand from memory: `ompctl cred add`/`cred ls`
+run exactly this (`gcloud config get-value account`, split on `@`) internally to
+auto-scope a bare key to `users/<username>/<key>` — it is the single source of truth
+for the value, not something to guess or copy from an example verbatim. Every
+`users/asmith` you see elsewhere in this repo's docs is an illustrative example, not
+a real account — substitute the current operator's actual username, resolved this
+way, when writing a Session CR or running `vault-add`/`vault-ls` by hand (those tools
+accept the subtree as a plain argument and don't auto-resolve it themselves).
+
 A session requests its subtrees in `spec.subtrees`:
 ```yaml
 spec:
-  subtrees: ["shared", "users/jnesbitt"]
+  subtrees: ["shared", "users/asmith"]
 ```
 ESO builds one K8s Secret (`omp-creds`) per session from all matched GSM secrets.
 
@@ -84,12 +98,12 @@ export OMP_ESO_SA=omp-eso@<project-id>.iam.gserviceaccount.com
 apiVersion: omp.mirantis.io/v1alpha1
 kind: Session
 metadata:
-  name: jnesbitt-work
+  name: asmith-work
   namespace: omp-system
 spec:
   subtrees:
     - shared         # platform-wide keys (GEMINI_API_KEY etc.)
-    - users/jnesbitt # personal keys (ATLASSIAN_TOKEN, GITHUB_TOKEN etc.)
+    - users/asmith # personal keys (ATLASSIAN_TOKEN, GITHUB_TOKEN etc.)
 ```
 
 The env var name is derived from the key: `atlassian-token` → `ATLASSIAN_TOKEN`,

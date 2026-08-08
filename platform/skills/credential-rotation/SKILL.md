@@ -51,7 +51,7 @@ If the value is well-formed (right length, no whitespace) but still 401, it is a
 ## Rotation happens from the host — not here
 
 When a credential is expired, **report it to the session's host administrator** and
-name the exact vault entry, e.g. `users/jnesbitt/atlassian-token`. Do **not** ask the
+name the exact vault entry, e.g. `users/asmith/atlassian-token`. Do **not** ask the
 user to paste a new token into the session, and do not attempt to write it anywhere:
 a pasted secret would persist de-obfuscated to the on-disk transcript and show on
 every guest's screen.

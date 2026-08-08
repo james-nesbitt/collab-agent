@@ -42,7 +42,12 @@ spec:
 EOF
 ```
 
-List more entries in `spec.subtrees` as needed, e.g. `["shared", "users/jnesbitt"]`.
+List more entries in `spec.subtrees` as needed, e.g. `["shared", "users/asmith"]`.
+`asmith` here is a stand-in — the real value is the operator's gcloud account's
+username (`gcloud config get-value account`, part before `@`); see
+[credential-management.md](../../docs/credential-management.md#personal-credential-self-service)
+for the exact resolution. Session CRs are hand-written YAML with no auto-scoping —
+unlike `ompctl cred add`, nothing derives this for you.
 
 Wait for the session to reach `Hosting`:
 ```bash
@@ -59,14 +64,14 @@ metadata:
   name: my-session
   namespace: omp-team-<team>     # must match spec.team; CR is isolated to your namespace
 spec:
-  subtrees: ["shared", "users/jnesbitt"]  # platform creds + personal GSM entries
+  subtrees: ["shared", "users/asmith"]  # platform creds + personal GSM entries
   team: <team>
 ```
 _Personal credentials are managed via `ompctl cred add` — see `ompctl --help`._
 List available vault credential names (never values):
 ```bash
 ./administrator.sh vault-ls shared           # platform creds
-./administrator.sh vault-ls users/jnesbitt   # your personal entries
+./administrator.sh vault-ls users/asmith   # your personal entries
 ```
 The join link is NOT in `kubectl get sessions` output. Retrieve explicitly:
 ```bash

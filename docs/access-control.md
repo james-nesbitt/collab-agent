@@ -26,7 +26,7 @@ but fully testable via `kubectl auth can-i --as-group=` impersonation.
 
 | Principal | IAM role | What it allows |
 |---|---|---|
-| `user:jnesbitt@mirantis.com` | `roles/container.admin` | Full cluster administration (break-glass) |
+| `user:asmith@mirantis.com` | `roles/container.admin` | Full cluster administration (break-glass) |
 | `group:omp-admins@mirantis.com` | `roles/container.admin` | Cluster administration via group |
 | `group:omp-team-<team>@mirantis.com` | `roles/container.clusterViewer` | `get-credentials` + cluster Console visibility; all K8s authz is RBAC-gated |
 
@@ -39,7 +39,7 @@ authorization is handled by RBAC — the IAM role only controls who can obtain c
 
 | Binding | Kind | Subject | Scope |
 |---|---|---|---|
-| `omp-admin` ClusterRoleBinding | `cluster-admin` | `user:jnesbitt@mirantis.com` | cluster-wide (break-glass) |
+| `omp-admin` ClusterRoleBinding | `cluster-admin` | `user:asmith@mirantis.com` | cluster-wide (break-glass) |
 | `omp-admins-group` ClusterRoleBinding | `cluster-admin` | `group:omp-admins@mirantis.com` | cluster-wide |
 
 ### Teams
@@ -115,6 +115,11 @@ spec:
   team: <team>
 ```
 
+`<name>` is the local part of your gcloud account (`gcloud config get-value
+account`, e.g. `asmith@mirantis.com` → `asmith`) — the same value `ompctl cred
+add`/`cred ls` auto-derive; see
+[credential-management.md](credential-management.md#personal-credential-self-service).
+
 The operator enforces that `spec.team` matches the CR namespace (`omp-team-<team>`).
 A CR with `spec.team: foo` created in `omp-team-bar` is rejected with status `Failed`.
 
@@ -131,7 +136,7 @@ Team members manage personal credentials as **self-service GSM entries** under
 ompctl cred add atlassian-token
 
 # Admin alternative (no python deps):
-./administrator.sh vault-add users/jnesbitt/atlassian-token
+./administrator.sh vault-add users/asmith/atlassian-token
 ```
 
 Request them in the Session CR via `spec.subtrees`:
@@ -140,7 +145,7 @@ Request them in the Session CR via `spec.subtrees`:
 spec:
   subtrees:
     - shared                 # platform vault creds (OLLAMA_CLOUD_API_KEY etc.)
-    - users/jnesbitt         # your personal creds (ATLASSIAN_TOKEN, GITHUB_TOKEN, …)
+    - users/asmith         # your personal creds (ATLASSIAN_TOKEN, GITHUB_TOKEN, …)
 ```
 
 Ownership is enforced at admission: the `omp-credential-secrets-ownership`
@@ -162,7 +167,7 @@ Team members have `roles/secretmanager.viewer` IAM — they can list credential 
 
 ```bash
 ./administrator.sh vault-ls shared           # platform creds available to all sessions
-./administrator.sh vault-ls users/jnesbitt   # personal entries for this user
+./administrator.sh vault-ls users/asmith   # personal entries for this user
 ```
 
 ## Listing and removing teams

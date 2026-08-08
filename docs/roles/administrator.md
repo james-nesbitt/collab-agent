@@ -29,12 +29,12 @@ gcloud storage buckets create gs://<tf-state-bucket> \
 # Create infra/terraform.tfvars
 cat > infra/terraform.tfvars <<EOF
 project           = "tools-348616"
-admin_gcp_account = "jnesbitt@mirantis.com"
+admin_gcp_account = "asmith@mirantis.com"
 group_domain      = "mirantis.com"
 omp_config_memory   = true
 omp_config_thinking = true
 self_relay_enabled = true
-self_relay_email   = "jnesbitt@mirantis.com"
+self_relay_email   = "asmith@mirantis.com"
 EOF
 
 # Provision everything
@@ -67,7 +67,7 @@ prompts for the value interactively (hidden — never echoed, never in shell his
 
 ```bash
 ./administrator.sh vault-add shared/ollama-cloud-api-key   # prompts for value
-./administrator.sh vault-add users/jnesbitt/atlassian-token
+./administrator.sh vault-add users/asmith/atlassian-token
 ```
 
 ### Subtree conventions
@@ -77,6 +77,11 @@ prompts for the value interactively (hidden — never echoed, never in shell his
 | `shared/` | Platform-wide credentials all sessions may need (e.g. Ollama Cloud key) | Any session with `spec.subtrees: ["shared"]` |
 | `users/<name>/` | Personal credentials scoped to one user (Atlassian, GitHub PAT) | Only sessions that explicitly include `users/<name>` in `spec.subtrees` |
 
+`<name>` is the local part of the operator's active gcloud account
+(`gcloud config get-value account`, e.g. `asmith@mirantis.com` → `asmith`) — the
+single source of truth for the value; `ompctl cred add`/`cred ls` derive it exactly
+this way for auto-scoping. `vault-add`/`vault-ls` and hand-written Session CRs don't
+auto-resolve it — substitute the real value, don't copy `asmith` from an example.
 
 ### Naming and env var derivation
 
@@ -86,8 +91,8 @@ stripped, `/` and `-` become `_`, uppercased. Examples:
 | Vault path | GSM secret | Env var |
 |---|---|---|
 | `shared/ollama-cloud-api-key` | `shared-ollama-cloud-api-key` | `OLLAMA_CLOUD_API_KEY` |
-| `users/jnesbitt/atlassian-token` | `users-jnesbitt-atlassian-token` | `ATLASSIAN_TOKEN` |
-| `users/jnesbitt/github-token` | `users-jnesbitt-github-token` | `GITHUB_TOKEN` |
+| `users/asmith/atlassian-token` | `users-asmith-atlassian-token` | `ATLASSIAN_TOKEN` |
+| `users/asmith/github-token` | `users-asmith-github-token` | `GITHUB_TOKEN` |
 
 End entry names with a secret keyword (`token`, `key`, `secret`, `password`) so
 omp's value obfuscation fires. Check what's stored (names only, never values):
@@ -95,7 +100,7 @@ omp's value obfuscation fires. Check what's stored (names only, never values):
 ```bash
 ./administrator.sh vault-ls               # all entries
 ./administrator.sh vault-ls shared        # one subtree
-./administrator.sh vault-ls users/jnesbitt
+./administrator.sh vault-ls users/asmith
 ```
 
 ### Injecting credentials into a session
@@ -106,7 +111,7 @@ Only `omp-creds` is auto-injected — nothing else is copied unless explicitly d
 
 ```yaml
 spec:
-  subtrees: ["shared", "users/jnesbitt"]  # gets OLLAMA_CLOUD_API_KEY + ATLASSIAN_* + GITHUB_TOKEN
+  subtrees: ["shared", "users/asmith"]  # gets OLLAMA_CLOUD_API_KEY + ATLASSIAN_* + GITHUB_TOKEN
 ```
 
 ### Container images
