@@ -238,8 +238,8 @@ cmd_session_transfer() {
     filename=$(basename "${jsonl}" .jsonl)
     local session_id="${filename#*_}"
 
-    # Derive pod namespace and CR namespace from session status.
-    local ns cr_ns
+    # Derive pod namespace, pod name, and CR namespace from session status.
+    local ns pod cr_ns
     for cr_ns in $(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}' \
                    | tr ' ' '\n' | grep -E '^omp-system$|^omp-team-'); do
         ns=$(kubectl get session "${session_name}" -n "${cr_ns}" \
@@ -247,6 +247,9 @@ cmd_session_transfer() {
         [[ -n "${ns}" ]] && break
     done
     [[ -n "${ns}" ]] || die "Session '${session_name}' not found or has no status.namespace yet"
+    pod=$(kubectl get session "${session_name}" -n "${cr_ns}" \
+          -o jsonpath='{.status.podName}' 2>/dev/null || true)
+    [[ -n "${pod}" ]] || die "Session '${session_name}' has no status.podName yet (pod not provisioned)"
     local pod_home="/home/omp"
     local pod_agent="${pod_home}/.omp/agent"
     local pod_encoded="-${session_name}"          # pod cwd is always ~/SESSION_NAME
@@ -254,15 +257,15 @@ cmd_session_transfer() {
 
     info "Session to transfer  : ${session_id}"
     info "Source               : ${jsonl}"
-    info "Destination          : ${ns}/omp:${pod_session_dir}/$(basename "${jsonl}")"
+    info "Destination          : ${ns}/${pod}:${pod_session_dir}/$(basename "${jsonl}")"
     info "Local encoding       : ${local_encoded}"
     info "Pod encoding         : ${pod_encoded}"
 
     # Create the target directory on the pod (idempotent).
-    kubectl exec -n "${ns}" omp -- mkdir -p "${pod_session_dir}"
+    kubectl exec -n "${ns}" "${pod}" -- mkdir -p "${pod_session_dir}"
 
     # Copy the session file to the pod PVC via kubectl cp (goes through the running pod).
-    kubectl cp "${jsonl}" "${ns}/omp:${pod_session_dir}/$(basename "${jsonl}")"
+    kubectl cp "${jsonl}" "${ns}/${pod}:${pod_session_dir}/$(basename "${jsonl}")"
     ok "Session file copied."
 
     # If encodings differ, inject RESUME_SESSION_ID so the entrypoint uses --resume=<id>.
